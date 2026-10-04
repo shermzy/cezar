@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ExternalLinkIcon, IdCardIcon } from 'lucide-react'
-import { Fragment, useState } from 'react'
+import { Fragment, useId, useState } from 'react'
 
 import { ApiError, putWorkspaceConfig } from '@/api/client'
 
@@ -154,21 +154,6 @@ function AccountsPane({ data }: { data: AgentProfilesResponse }) {
   // stale the moment a fifth runner existed, and "every agent" quietly became "four of them".
   const providers: readonly ProviderId[] = RUNNER_ORDER
 
-  if (!data.editable) {
-    return (
-      <div
-        data-slot="accounts-section"
-        className="mx-auto flex w-full max-w-2xl flex-col gap-4 p-4 md:p-6"
-      >
-        <h2 className="text-sm font-semibold text-foreground">Agent accounts</h2>
-        <p data-slot="accounts-hosted" className="text-[13px] text-soft-foreground">
-          Agent accounts are managed from the machine that owns the checkout — this cockpit runs in
-          hosted mode.
-        </p>
-      </div>
-    )
-  }
-
   return (
     <div
       data-slot="accounts-section"
@@ -177,10 +162,17 @@ function AccountsPane({ data }: { data: AgentProfilesResponse }) {
       <div>
         <h2 className="text-sm font-semibold text-foreground">Agent accounts</h2>
         <p className="text-[13px] text-muted-foreground">
-          One agent per tab: whether it is installed, and which logins you have. Add a second
-          config folder to keep a work account beside a personal one; each project picks which it
-          uses in its own Agents settings.
+          {data.editable
+            ? 'One agent per tab: whether it is installed, and which logins you have. Add a second config folder to keep a work account beside a personal one; each project picks which it uses in its own Agents settings.'
+            : 'One agent per tab: whether it is installed, and which logins the machine hosting cezar has. A hosted cockpit never shows their folders.'}
         </p>
+        {/* Not local and not managed here (spec 2026-10-04-hosted-agent-accounts): the rows are a
+            reading surface only — every write, and the per-account probe, answers 409. */}
+        {data.manageable ? null : (
+          <p data-slot="accounts-readonly" className="mt-1 text-[13px] text-soft-foreground">
+            Account management is off for this cockpit.
+          </p>
+        )}
       </div>
 
       <DefaultsForNewProjects profiles={data} />
@@ -204,6 +196,8 @@ function AccountsPane({ data }: { data: AgentProfilesResponse }) {
               check={health.data?.checks?.find((c) => c.name === provider)}
               accounts={data.profiles.filter((p) => p.provider === provider)}
               canCarryAccounts={data.profileCapableProviders.includes(provider)}
+              editable={data.editable}
+              manageable={data.manageable}
               onAdd={() => setAdding(provider)}
               onRemove={setConfirming}
             />
@@ -228,7 +222,7 @@ function AccountsPane({ data }: { data: AgentProfilesResponse }) {
           <AlertDialogHeader>
             <AlertDialogTitle>Remove “{confirming?.label}”?</AlertDialogTitle>
             <AlertDialogDescription>
-              This only forgets the account. Nothing in {confirming?.configDir} is deleted — not
+              This only forgets the account. Nothing in {confirming?.configDir ?? 'its folder'} is deleted — not
               your login, not your sessions. Projects using it fall back to the default account,
               and tasks that ran under it can no longer be resumed from here.
             </AlertDialogDescription>
@@ -266,6 +260,8 @@ function AgentTab({
   check,
   accounts,
   canCarryAccounts,
+  editable,
+  manageable,
   onAdd,
   onRemove,
 }: {
@@ -274,6 +270,10 @@ function AgentTab({
   check: BackendCheck | undefined
   accounts: AgentProfile[]
   canCarryAccounts: boolean
+  /** A local cockpit: folders are shown, and Connect opens a terminal on this machine. */
+  editable: boolean
+  /** This cockpit may change accounts and probe one (spec 2026-10-04-hosted-agent-accounts). */
+  manageable: boolean
   onAdd: () => void
   onRemove: (account: AgentProfile) => void
 }) {
@@ -313,7 +313,7 @@ function AgentTab({
 
       <div className="flex items-center justify-between gap-3">
         <h3 className="text-[13px] font-semibold text-foreground">Logins</h3>
-        {canCarryAccounts ? (
+        {canCarryAccounts && manageable ? (
           <Button
             type="button"
             variant="outline"
@@ -329,7 +329,13 @@ function AgentTab({
 
       <ul className="divide-y divide-border/60 rounded-md border border-border bg-card">
         {accounts.map((account) => (
-          <AccountRow key={account.id} account={account} onRemove={() => onRemove(account)} />
+          <AccountRow
+            key={account.id}
+            account={account}
+            editable={editable}
+            manageable={manageable}
+            onRemove={() => onRemove(account)}
+          />
         ))}
       </ul>
 
@@ -369,6 +375,7 @@ function DefaultsForNewProjects({ profiles }: { profiles: AgentProfilesResponse 
   // A row per runner, so every runner's own host catalog is needed at once (#794).
   const catalogs = useRunnerModelCatalogs()
   const select = useSelectAgentProfile()
+  const readOnlyHintId = useId()
 
   const save = useMutation({
     mutationFn: (patch: SetWorkspaceConfigInput) => putWorkspaceConfig(patch),
@@ -401,6 +408,9 @@ function DefaultsForNewProjects({ profiles }: { profiles: AgentProfilesResponse 
         providerStatus={providerStatus}
         disabled={save.isPending}
         accountDisabled={select.isPending}
+        // Hosted: only the account in force stays pickable, and it writes the runner alone.
+        accountReadOnly={!profiles.manageable}
+        accountHintId={readOnlyHintId}
         onPick={(picked, account, hasAccountChoice) => {
           if (picked !== runner) save.mutate({ agentDefaults: { runner: picked } })
           // `projectId: null` targets the machine-wide default rather than one repo. Only for an
@@ -414,6 +424,16 @@ function DefaultsForNewProjects({ profiles }: { profiles: AgentProfilesResponse 
           }
         }}
       />
+      {profiles.manageable ? null : (
+        <p
+          id={readOnlyHintId}
+          data-slot="agents-account-readonly"
+          className="text-[13px] text-muted-foreground"
+        >
+          Which account an agent uses can’t be changed from this cockpit — account management is
+          off here.
+        </p>
+      )}
 
       <div className="flex flex-col gap-2">
         <span className="text-xs text-muted-foreground">Default model per agent</span>
@@ -466,17 +486,33 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   )
 }
 
-function AccountRow({ account, onRemove }: { account: AgentProfile; onRemove: () => void }) {
+function AccountRow({
+  account,
+  editable,
+  manageable,
+  onRemove,
+}: {
+  account: AgentProfile
+  /** A local cockpit: the folder is shown, and Connect opens a terminal on this machine. */
+  editable: boolean
+  /** This cockpit may change accounts and probe one (spec 2026-10-04-hosted-agent-accounts). */
+  manageable: boolean
+  onRemove: () => void
+}) {
   const [showDetails, setShowDetails] = useState(false)
   const routeId = agentAccountRouteId(account)
   const connect = useConnectAgentAccount()
   const recheck = useRecheckAgentAccount()
   // The listing carries a status whenever the server has one cached — which, after its boot warm,
   // is the normal case. Only ask for a probe when it does not: an account added mid-session, or a
-  // cache that has aged out. Either way the row renders immediately.
-  const probed = useAgentAccountStatus(routeId, account.status === undefined)
+  // cache that has aged out. Either way the row renders immediately. NEVER without management: the
+  // per-account route answers 409 there (it may spawn a probe, so it is not offered read-only), and
+  // a row waiting on it would say "Checking…" forever.
+  const probed = useAgentAccountStatus(routeId, manageable && account.status === undefined)
   const status = account.status ?? probed.data?.status
   const presentation = status ? STATUS_PRESENTATION[status.status] : undefined
+  // Nothing known and nothing in flight is said plainly, never as a pulse that will not end.
+  const statusLabel = presentation?.label ?? (manageable ? 'Checking…' : 'Status unknown')
 
   return (
     <li
@@ -494,21 +530,28 @@ function AccountRow({ account, onRemove }: { account: AgentProfile; onRemove: ()
               </Badge>
             ) : null}
           </div>
-          <p
-            data-slot="account-path"
-            className="mt-0.5 truncate font-mono text-[11.5px] text-soft-foreground"
-            title={account.path}
-          >
-            {account.configDir}
-          </p>
+          {/* A hosted cockpit sends no folder at all — the row is its label. */}
+          {account.configDir !== undefined ? (
+            <p
+              data-slot="account-path"
+              className="mt-0.5 truncate font-mono text-[11.5px] text-soft-foreground"
+              title={account.path}
+            >
+              {account.configDir}
+            </p>
+          ) : null}
           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             {/* "Checking…" is a real, distinct state from any probe RESULT: the answer is not in
                 yet. Showing `unknown` here would claim a verification that never ran. */}
-            <StatusDot tone={presentation?.tone ?? 'neutral'} pulse={presentation === undefined} />
-            <span data-slot="account-status">{presentation?.label ?? 'Checking…'}</span>
-            {!account.exists ? (
+            <StatusDot
+              tone={presentation?.tone ?? 'neutral'}
+              pulse={presentation === undefined && manageable}
+            />
+            <span data-slot="account-status">{statusLabel}</span>
+            {/* `=== false`: an absent field is "not disclosed" (a hosted cockpit), never "missing". */}
+            {account.exists === false ? (
               <span data-slot="account-missing">— folder not created yet; Connect will make it</span>
-            ) : !account.looksValid ? (
+            ) : account.looksValid === false ? (
               <span data-slot="account-unrecognised">
                 — this folder does not look like {PROVIDER_LABEL[account.provider]} config yet
               </span>
@@ -522,66 +565,69 @@ function AccountRow({ account, onRemove }: { account: AgentProfile; onRemove: ()
             are how an account becomes usable at all, and the row's own "folder not created yet"
             copy points at Connect. Burying the only sign-in path behind "Show details" is what left
             an added account with no way to log in. */}
-        <div className="flex shrink-0 items-center gap-2">
-          {status?.status !== 'connected' ? (
+        {manageable ? (
+          <div className="flex shrink-0 items-center gap-2">
+            {/* Connect hands a login to a terminal on THIS machine, so only a local cockpit has it. */}
+            {editable && status?.status !== 'connected' ? (
+              <Button
+                type="button"
+                size="sm"
+                data-action="account-connect"
+                disabled={connect.isPending}
+                onClick={() =>
+                  connect.mutate(
+                    { provider: account.provider, ...(account.isDefault ? {} : { profileId: account.id }) },
+                    {
+                      onSuccess: (result) =>
+                        toast(result.opened
+                          ? 'Finish signing in in the terminal, then Check again.'
+                          : 'This account is already connected.'),
+                      // The server answers a copyable command when it cannot open a terminal (hosted
+                      // mode, no emulator, a folder it refuses to embed). Showing it is the whole
+                      // point of failing closed rather than running the bare login.
+                      onError: (error: Error) =>
+                        toast(error instanceof ApiError && error.command
+                          ? `${error.message} — run: ${error.command}`
+                          : error.message, { tone: 'danger' }),
+                    },
+                  )
+                }
+              >
+                Connect
+              </Button>
+            ) : null}
             <Button
               type="button"
+              variant="ghost"
               size="sm"
-              data-action="account-connect"
-              disabled={connect.isPending}
+              data-action="account-recheck"
+              disabled={recheck.isPending}
+              title="Re-probe this account's login now, instead of waiting for the cached answer"
               onClick={() =>
-                connect.mutate(
-                  { provider: account.provider, ...(account.isDefault ? {} : { profileId: account.id }) },
-                  {
-                    onSuccess: (result) =>
-                      toast(result.opened
-                        ? 'Finish signing in in the terminal, then Check again.'
-                        : 'This account is already connected.'),
-                    // The server answers a copyable command when it cannot open a terminal (hosted
-                    // mode, no emulator, a folder it refuses to embed). Showing it is the whole
-                    // point of failing closed rather than running the bare login.
-                    onError: (error: Error) =>
-                      toast(error instanceof ApiError && error.command
-                        ? `${error.message} — run: ${error.command}`
-                        : error.message, { tone: 'danger' }),
-                  },
-                )
+                recheck.mutate(routeId, {
+                  onError: (error: Error) => toast(error.message, { tone: 'danger' }),
+                })
               }
             >
-              Connect
+              Check again
             </Button>
-          ) : null}
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            data-action="account-recheck"
-            disabled={recheck.isPending}
-            title="Re-probe this account's login now, instead of waiting for the cached answer"
-            onClick={() =>
-              recheck.mutate(routeId, {
-                onError: (error: Error) => toast(error.message, { tone: 'danger' }),
-              })
-            }
-          >
-            Check again
-          </Button>
-          {/* Identity is opt-in: nothing is requested until this is pressed, so an email is absent
-              from the page rather than merely unrendered. */}
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            data-action="account-details-toggle"
-            aria-expanded={showDetails}
-            onClick={() => setShowDetails((on) => !on)}
-          >
-            {showDetails ? 'Hide details' : 'Show details'}
-          </Button>
-        </div>
+            {/* Identity is opt-in: nothing is requested until this is pressed, so an email is absent
+                from the page rather than merely unrendered. */}
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              data-action="account-details-toggle"
+              aria-expanded={showDetails}
+              onClick={() => setShowDetails((on) => !on)}
+            >
+              {showDetails ? 'Hide details' : 'Show details'}
+            </Button>
+          </div>
+        ) : null}
       </div>
 
-      {showDetails ? (
+      {manageable && showDetails ? (
         <AccountDetails account={account} routeId={routeId} onRemove={onRemove} />
       ) : null}
     </li>
@@ -652,46 +698,50 @@ function AccountDetails({
         </p>
       )}
 
-      <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-border/60 pt-2.5">
-        <span className="mr-1 text-xs text-muted-foreground">Config files</span>
-        {account.files.map((file) => (
+      {/* Files and the folder are paths: a cockpit that sends no folder has nothing to open here
+          (and its `open` route is refused anyway). */}
+      {account.configDir !== undefined ? (
+        <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-border/60 pt-2.5">
+          <span className="mr-1 text-xs text-muted-foreground">Config files</span>
+          {(account.files ?? []).map((file) => (
+            <OpenInMenu
+              key={file.id}
+              slot="account-open-file"
+              label={file.label}
+              triggerVariant="outline"
+              disabled={open.isPending}
+              // A file the agent has not written yet is offered but says so, because "Connect then
+              // it appears" is the normal path and a hidden button would look like a missing feature.
+              title={file.exists ? file.path : `${file.path} — not created yet`}
+              choices={fileChoices}
+              onPick={(target) => openPath(file.id, file.label, target)}
+              leading={
+                <DropdownMenuItem
+                  data-target="system"
+                  onSelect={() => openPath(file.id, file.label)}
+                >
+                  <ExternalLinkIcon aria-hidden="true" />
+                  System default
+                </DropdownMenuItem>
+              }
+            />
+          ))}
           <OpenInMenu
-            key={file.id}
-            slot="account-open-file"
-            label={file.label}
-            triggerVariant="outline"
+            slot="account-open-folder"
+            label="Folder"
             disabled={open.isPending}
-            // A file the agent has not written yet is offered but says so, because "Connect then
-            // it appears" is the normal path and a hidden button would look like a missing feature.
-            title={file.exists ? file.path : `${file.path} — not created yet`}
-            choices={fileChoices}
-            onPick={(target) => openPath(file.id, file.label, target)}
+            title={account.path}
+            choices={folderChoices}
+            onPick={(target) => openPath('folder', 'folder', target)}
             leading={
-              <DropdownMenuItem
-                data-target="system"
-                onSelect={() => openPath(file.id, file.label)}
-              >
+              <DropdownMenuItem data-target="system" onSelect={() => openPath('folder', 'folder')}>
                 <ExternalLinkIcon aria-hidden="true" />
                 System default
               </DropdownMenuItem>
             }
           />
-        ))}
-        <OpenInMenu
-          slot="account-open-folder"
-          label="Folder"
-          disabled={open.isPending}
-          title={account.path}
-          choices={folderChoices}
-          onPick={(target) => openPath('folder', 'folder', target)}
-          leading={
-            <DropdownMenuItem data-target="system" onSelect={() => openPath('folder', 'folder')}>
-              <ExternalLinkIcon aria-hidden="true" />
-              System default
-            </DropdownMenuItem>
-          }
-        />
-      </div>
+        </div>
+      ) : null}
 
       {/* The discovered account carries no Rename/Remove at all — it is what cezar found, so either
           would imply a setting that does not exist. Nothing is rendered for it, not a disabled

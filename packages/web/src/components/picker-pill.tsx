@@ -146,7 +146,7 @@ export function PickerPill({
         ) : null}
         <DropdownMenuRadioGroup value={value} onValueChange={onPick}>
           {visibleOptions.map((option) => (
-            <DropdownMenuRadioItem key={option.value} value={option.value} className="gap-2.5">
+            <DropdownMenuRadioItem key={option.value} value={option.value} data-value={option.value} className="gap-2.5">
               <span className="flex min-w-0 flex-col">
                 <span className="text-[12.5px] font-medium">{option.label}</span>
                 {option.desc ? (
@@ -179,8 +179,10 @@ export interface RunnerAccountChoice {
   provider: Runner
   id: string
   label: string
-  /** The folder, as written. The labels are cezar's invention; the folder IS the account. */
-  configDir: string
+  /** The folder, as written. The labels are cezar's invention; the folder IS the account.
+   *  Absent on a hosted cockpit, which never sends a folder (spec 2026-10-04-hosted-agent-accounts);
+   *  the row is then its label alone. */
+  configDir?: string
 }
 
 /** How one row of the pill's menu is addressed: the agent, and which of its logins. */
@@ -239,7 +241,8 @@ export function RunnerPill({
     return logins.map((login) => ({
       value: choiceValue(runner.id, login.id),
       label: `${runner.id} · ${login.label}`,
-      // The folder, because the label is cezar's invention and the folder is the account.
+      // The folder, because the label is cezar's invention and the folder is the account. A hosted
+      // cockpit sends none, and then the row is its label alone.
       desc: login.configDir,
     }))
   })

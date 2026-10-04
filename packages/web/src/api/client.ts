@@ -2108,8 +2108,8 @@ export async function getWorkspaceHostUsage(opts?: ReadOptions): Promise<HostUsa
 
 /**
  * Every agent account on this machine (spec 2026-07-29-agent-profiles) — the discovered defaults
- * plus any extra config dirs. Workspace-level, so never scope-prefixed. Hosted mode answers
- * `{editable: false, profiles: [], …}` rather than leaking host paths.
+ * plus any extra config dirs. Workspace-level, so never scope-prefixed. A hosted cockpit lists the
+ * accounts WITHOUT their folders (spec 2026-10-04-hosted-agent-accounts).
  *
  * The collections are filled in HERE rather than guarded at each of the ~5 read sites. During
  * development the cockpit and the server can be different versions (Vite serves this bundle while
@@ -2125,10 +2125,17 @@ export async function getAgentProfiles(opts?: ReadOptions): Promise<AgentProfile
   )
   return {
     ...answer,
+    // A server older than the hosted list never sends it, and there "may this cockpit manage
+    // accounts" was exactly "is it local" — the flag it does send.
+    manageable: answer.manageable ?? answer.editable,
     profileCapableProviders: answer.profileCapableProviders ?? [],
     selections: answer.selections ?? {},
     defaults: answer.defaults ?? {},
-    profiles: (answer.profiles ?? []).map((profile) => ({ ...profile, files: profile.files ?? [] })),
+    // `files` is filled in only beside a folder. A hosted cockpit sends neither, and there an
+    // absent `files` means "not disclosed" — `[]` would claim "this account has no config files".
+    profiles: (answer.profiles ?? []).map((profile) =>
+      profile.configDir === undefined ? profile : { ...profile, files: profile.files ?? [] },
+    ),
   }
 }
 

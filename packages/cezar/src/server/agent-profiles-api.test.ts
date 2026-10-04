@@ -1,4 +1,5 @@
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -7,6 +8,7 @@ import { agentAccountsPath } from '../paths.ts';
 import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
 import { loadAgentAccounts, mergeWriteAgentAccounts } from '../workspace/agent-accounts.ts';
+import { mergeWriteWorkspaceConfig } from '../workspace/config.ts';
 import { clearProjectProbeCache, registerProject } from '../workspace/projects.ts';
 import { apiRequest } from './loopback-request.testkit.ts';
 import { ProviderAuthService } from '../core/provider-auth.ts';
@@ -42,6 +44,7 @@ describe('agent profiles API', () => {
     home: process.env.CEZ_HOME,
     remote: process.env.CEZ_REMOTE,
     dryRun: process.env.CEZ_DRY_RUN,
+    singleProject: process.env.CEZ_SINGLE_PROJECT,
   };
   let home: string;
   let repoRoot: string;
@@ -52,6 +55,7 @@ describe('agent profiles API', () => {
     repoRoot = mkdtempSync(join(realpathSync(tmpdir()), 'cez-profiles-repo-'));
     process.env.CEZ_HOME = home;
     delete process.env.CEZ_REMOTE;
+    delete process.env.CEZ_SINGLE_PROJECT;
     // Deterministic on any machine: no real agent CLIs are probed.
     process.env.CEZ_DRY_RUN = '1';
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
@@ -65,6 +69,7 @@ describe('agent profiles API', () => {
       ['CEZ_HOME', saved.home],
       ['CEZ_REMOTE', saved.remote],
       ['CEZ_DRY_RUN', saved.dryRun],
+      ['CEZ_SINGLE_PROJECT', saved.singleProject],
     ] as const) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -160,7 +165,7 @@ describe('agent profiles API', () => {
         isDefault: false,
       });
       // `~` is stored as written and expanded only for `path`.
-      expect(body.profile.path.startsWith('~')).toBe(false);
+      expect(body.profile.path!.startsWith('~')).toBe(false);
     });
 
     it('falls back to the folder name when no label is given', async () => {
@@ -550,6 +555,41 @@ describe('agent profiles API', () => {
       expect(spawns.length).toBe(after);
     });
 
+    it('warms every account in hosted mode too — the hosted listing serves those answers (H1)', async () => {
+      await send('POST', '/api/v1/workspace/agent-profiles', {
+        provider: 'claude',
+        label: 'work',
+        configDir: claudeDir('claude-klaudiusz'),
+      });
+      process.env.CEZ_REMOTE = '1';
+      const probes: Array<Record<string, string> | undefined> = [];
+      const app = makeApp({
+        socketHub: { registerTopic: () => () => undefined, attach: () => undefined, close: () => undefined },
+        providerAuth: new ProviderAuthService({
+          runCommand: async (_executable, _args, _timeout, env) => {
+            probes.push(env);
+            return { stdout: '{"loggedIn":true}', stderr: '', exitCode: 0 };
+          },
+        }),
+      });
+
+      await vi.waitFor(async () => {
+        const res = await apiRequest(app, '/api/v1/workspace/agent-profiles');
+        const body = (await res.json()) as AgentProfilesResponse;
+        expect(body.profiles.find((p) => p.id === 'work')?.status).toMatchObject({
+          status: 'connected',
+          profileId: 'work',
+        });
+        // 10 s, not the 1 s default: under the full suite's load this warm was seen to need longer.
+      }, { timeout: 10_000, interval: 50 });
+      // The account's OWN probe ran, aimed at its own folder — which stays on the server.
+      expect(probes.some((env) => env?.CLAUDE_CONFIG_DIR !== undefined)).toBe(true);
+      // Join the boot health refresh the hub started: its git/CLI probes run with their cwd in
+      // `repoRoot`, and on Windows `afterEach` cannot remove a folder a live process sits in (EPERM).
+      await apiRequest(app, '/api/v1/health');
+      // 15 s: above the 10 s wait, so a red run fails on the assertion, not on vitest's 5 s default.
+    }, 15_000);
+
     it('re-checking one account does not throw away what it knows about the others', async () => {
       // The regression: a single `forgetProfileStatus()` cleared the whole per-account cache, so
       // "Check again" on one row — or repointing it — made every other account cold again.
@@ -606,11 +646,12 @@ describe('agent profiles API', () => {
       const account = await create('work', signedIn('claude-klaudiusz'));
       const row = (await list()).profiles.find((p) => p.id === account.id)!;
       // Resolved inside THIS account's folder, not the default one's.
-      const settings = row.files.find((f) => f.label === 'settings.json');
-      expect(settings?.path.startsWith(row.path)).toBe(true);
+      // A local answer always carries the folder fields (only a hosted one leaves them out).
+      const settings = row.files!.find((f) => f.label === 'settings.json');
+      expect(settings?.path.startsWith(row.path!)).toBe(true);
       expect(settings?.exists).toBe(true);
       // A file the agent has not written yet is listed honestly rather than omitted.
-      expect(row.files.find((f) => f.label === 'CLAUDE.md')?.exists).toBe(false);
+      expect(row.files!.find((f) => f.label === 'CLAUDE.md')?.exists).toBe(false);
     });
 
     it('answers the identity on demand, and only the named fields', async () => {
@@ -647,7 +688,7 @@ describe('agent profiles API', () => {
         body: JSON.stringify({ file: 'claude.user.settings' }),
       });
       expect(res.status).toBe(200);
-      expect(opened).toEqual([join(account.path, 'settings.json')]);
+      expect(opened).toEqual([join(account.path!, 'settings.json')]);
     });
 
     it('opens the account folder itself', async () => {
@@ -734,9 +775,111 @@ describe('agent profiles API', () => {
       process.env.CEZ_REMOTE = '1';
     });
 
-    it('withholds the listing — the absolute paths are the host disclosure', async () => {
-      const body = await list();
-      expect(body).toMatchObject({ editable: false, profiles: [] });
+    // Only the machine default is pinned here: a per-project selection needs a registered project,
+    // which `registerProject` cannot create on Windows. Selections are pinned in the hosted e2e
+    // (`hosted-accounts-list.e2e.ts`); which roots a hosted listing may name is the next case.
+    it('lists every account without its folder — labels and defaults, no path, no existence', async () => {
+      // Seeded while still local, so the account and the machine default exist before the flip.
+      delete process.env.CEZ_REMOTE;
+      const { body: created } = await send('POST', '/api/v1/workspace/agent-profiles', {
+        provider: 'claude',
+        label: 'Work',
+        configDir: claudeDir('claude-work'),
+      });
+      await send('PUT', '/api/v1/workspace/agent-profiles/selection', {
+        projectId: null,
+        provider: 'claude',
+        profileId: created.profile.id,
+      });
+      process.env.CEZ_REMOTE = '1';
+
+      const res = await apiRequest(makeApp(), '/api/v1/workspace/agent-profiles');
+      expect(res.status).toBe(200);
+      const raw = await res.text();
+      const body = JSON.parse(raw) as AgentProfilesResponse;
+      expect(body).toMatchObject({ editable: false, manageable: false, defaults: { claude: created.profile.id } });
+      expect(body.profiles.find((p) => p.id === created.profile.id)).toMatchObject({
+        provider: 'claude',
+        label: 'Work',
+        isDefault: false,
+      });
+      // Hidden means ABSENT (spec 2026-10-04-hosted-agent-accounts): `exists`/`looksValid` would say
+      // which folders exist, and the other three are absolute paths.
+      for (const profile of body.profiles) {
+        for (const key of ['configDir', 'path', 'files', 'exists', 'looksValid'] as const) {
+          expect(profile, `${profile.provider}:${profile.id}`).not.toHaveProperty(key);
+        }
+      }
+      expect(raw).not.toContain(JSON.stringify(home).slice(1, -1));
+    });
+
+    it('names only registered projects and the boot folder, and strips every key the schema does not know', async () => {
+      // Nothing removes a selection when its project is unregistered, and the store keeps unknown
+      // keys on disk (`.passthrough()`: a hand edit, or a newer cezar's). Hosted `/api/v1/projects`
+      // discloses registered roots only, so neither may reach a hosted client. The boot folder is the
+      // one other root a hosted client already holds (`/repo` serves it, and the composer reads its
+      // selection from there), so a selection keyed by it stays even while it is unregistered.
+      //
+      // The registry is seeded as a file in POSIX form (all its schema asks is a leading `/`),
+      // because `registerProject` cannot register a Windows root — which is what lets the kept half
+      // below be shown on every platform, so a listing that dropped everything would still fail.
+      const kept = '/srv/hosted-listing/registered';
+      const gone = '/srv/hosted-listing/unregistered';
+      await mergeWriteWorkspaceConfig((config) => {
+        config.projects = [
+          { id: 'registered', root: kept, name: 'registered', addedAt: '', lastOpenedAt: '', source: 'local' },
+        ];
+      });
+      // Never registered here: the registry holds only `kept`. The same spelling `/api/v1/projects`
+      // gives an unregistered boot folder.
+      const boot = await realpath(repoRoot);
+      await mergeWriteAgentAccounts((store) => {
+        store.selections[kept] = { claude: 'work', futureProvider: 'x' };
+        store.selections[gone] = { claude: 'work' };
+        store.selections[boot] = { codex: 'work', futureProvider: 'x' };
+        store.defaults = { codex: 'work', futureProvider: 'x' };
+      });
+
+      const res = await apiRequest(makeApp(), '/api/v1/workspace/agent-profiles');
+      expect(res.status).toBe(200);
+      const raw = await res.text();
+      const body = JSON.parse(raw) as AgentProfilesResponse;
+
+      expect(body.selections).toEqual({ [kept]: { claude: 'work' }, [boot]: { codex: 'work' } });
+      expect(body.defaults).toEqual({ codex: 'work' });
+      expect(raw).not.toContain(gone);
+      expect(raw).not.toContain('futureProvider');
+
+      // Served filtered, never rewritten: the file keeps the stale root and the unknown keys, so an
+      // older cezar sharing the home never loses what a newer one wrote.
+      const onDisk = await loadAgentAccounts();
+      expect(onDisk.selections[gone]).toEqual({ claude: 'work' });
+      expect(onDisk.selections[kept]).toMatchObject({ futureProvider: 'x' });
+      expect(onDisk.defaults).toMatchObject({ futureProvider: 'x' });
+    });
+
+    it('under CEZ_SINGLE_PROJECT names only the boot project, as hosted /projects does', async () => {
+      // Single-project mode shows a hosted client one project; a selection keyed by another
+      // registered root would name a folder that route does not.
+      process.env.CEZ_SINGLE_PROJECT = '1';
+      const boot = '/srv/hosted-listing/boot-project';
+      const other = '/srv/hosted-listing/other-project';
+      await mergeWriteWorkspaceConfig((config) => {
+        config.projects = [
+          { id: 'boot-project', root: boot, name: 'boot-project', addedAt: '', lastOpenedAt: '', source: 'local' },
+          { id: 'other-project', root: other, name: 'other-project', addedAt: '', lastOpenedAt: '', source: 'local' },
+        ];
+      });
+      await mergeWriteAgentAccounts((store) => {
+        store.selections[boot] = { claude: 'work' };
+        store.selections[other] = { claude: 'work' };
+      });
+
+      const res = await apiRequest(makeApp({ bootProjectId: 'boot-project' }), '/api/v1/workspace/agent-profiles');
+      expect(res.status).toBe(200);
+      const raw = await res.text();
+      expect((JSON.parse(raw) as AgentProfilesResponse).selections).toEqual({ [boot]: { claude: 'work' } });
+      expect(raw).not.toContain(other);
     });
 
     it('refuses the identity read — an email is host state a hosted client is not trusted with', async () => {

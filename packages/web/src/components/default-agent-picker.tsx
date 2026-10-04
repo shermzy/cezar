@@ -43,8 +43,16 @@ export function agentPickerRows(profiles: readonly AgentProfile[]): AgentPickerR
       // folder the CLI has not written yet is called out rather than left looking fine: a run under
       // it fails on auth BY DESIGN — it must not quietly fall back to another login — so the place
       // to say so is where the choice is made.
-      desc: login.exists ? login.configDir : `${login.configDir} — folder not created yet`,
-      missing: !login.exists,
+      // `=== false`, never falsiness: a hosted cockpit leaves `exists` and `configDir` out, and that
+      // means "not disclosed" — not "missing" (spec 2026-10-04-hosted-agent-accounts). No folder, no
+      // description: the row is its label alone.
+      desc:
+        login.configDir === undefined
+          ? ''
+          : login.exists === false
+            ? `${login.configDir} — folder not created yet`
+            : login.configDir,
+      missing: login.exists === false,
     }))
   })
 }
@@ -60,6 +68,8 @@ export function DefaultAgentPicker({
   providerStatus,
   disabled = false,
   accountDisabled = false,
+  accountReadOnly = false,
+  accountHintId,
   onPick,
 }: {
   rows: readonly AgentPickerRow[]
@@ -74,9 +84,28 @@ export function DefaultAgentPicker({
   disabled?: boolean
   /** Account rows only: the write target is not known yet (e.g. the project registry is loading). */
   accountDisabled?: boolean
-  onPick: (runner: Runner, account: string | null, hasAccountChoice: boolean) => void
+  /**
+   * Accounts cannot be changed on this cockpit (spec 2026-10-04-hosted-agent-accounts H1: the
+   * selection route answers 409). The row of the account already in force for a runner stays
+   * selectable, because picking it changes the runner alone; every other account row is disabled.
+   * `onPick`'s third argument is then `false`, so the caller writes no selection.
+   */
+  accountReadOnly?: boolean
+  /** The element that says WHY an account row is locked (`accountReadOnly`). The locked rows name it
+   *  in `aria-describedby`, so a screen reader gets the reason the tooltip gives everyone else. */
+  accountHintId?: string
+  /** `writeAccount`: the pick names an account the caller should store (a runner with a choice of
+   *  logins, on a cockpit that may change it). */
+  onPick: (runner: Runner, account: string | null, writeAccount: boolean) => void
 }) {
   const stacked = hasAgentAccounts(rows)
+  // The account a runner really uses. A stored id that no row carries (an account since removed, a
+  // hand edit, the reserved `default` spelling) is a run on the discovered account, so THAT row is
+  // the one in force — otherwise nothing is checked, and a read-only picker locks every row.
+  const accountInForce = (id: Runner): string | null => {
+    const stored = accountFor(id)
+    return rows.some((row) => row.runner.id === id && row.account === stored) ? stored : null
+  }
   return (
     <div
       role="radiogroup"
@@ -106,7 +135,11 @@ export function DefaultAgentPicker({
               ? undefined
               : 'Connect this provider before selecting it.'
         const hasAccountChoice = rows.filter((other) => other.runner.id === row.runner.id).length > 1
-        const checked = row.runner.id === runner && row.account === accountFor(row.runner.id)
+        // The login this runner already uses — the one row a read-only picker still offers.
+        const inForce = row.account === accountInForce(row.runner.id)
+        const checked = row.runner.id === runner && inForce
+        const readOnlyLocked = hasAccountChoice && accountReadOnly && !inForce
+        const accountLocked = (hasAccountChoice && accountDisabled) || readOnlyLocked
         return (
           <button
             key={`${row.runner.id}:${row.account ?? ''}`}
@@ -115,18 +148,22 @@ export function DefaultAgentPicker({
             aria-checked={checked}
             data-value={row.runner.id}
             data-account={row.account ?? ''}
-            title={providerReason ?? row.desc}
-            disabled={
-              disabled || !providerConnected || (hasAccountChoice && accountDisabled)
+            title={
+              providerReason ??
+              (readOnlyLocked
+                ? 'Which account an agent uses can’t be changed from this cockpit.'
+                : row.desc)
             }
-            onClick={() => onPick(row.runner.id, row.account, hasAccountChoice)}
+            aria-describedby={readOnlyLocked ? accountHintId : undefined}
+            disabled={disabled || !providerConnected || accountLocked}
+            onClick={() => onPick(row.runner.id, row.account, hasAccountChoice && !accountReadOnly)}
             className={cn(
               'rounded-sm px-3 py-1.5 text-left font-mono text-[13px] font-medium transition-colors disabled:opacity-50',
               checked ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground',
             )}
           >
             {row.label}
-            {stacked ? (
+            {stacked && row.desc !== '' ? (
               <span
                 data-slot={row.missing ? 'agents-account-missing' : 'agents-account-dir'}
                 data-runner={row.runner.id}

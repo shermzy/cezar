@@ -45,7 +45,7 @@ const PROJECT: ProjectListEntry = {
 /** One discovered profile per provider plus one extra Claude login. */
 const WITH_WORK_ACCOUNT: AgentProfilesResponse = {
   defaults: {},
-  editable: true,
+  editable: true, manageable: true,
   profileCapableProviders: ['claude', 'codex'],
   selections: {},
   profiles: [
@@ -572,7 +572,7 @@ describe('the agents form', () => {
       serve({
         agentProfiles: {
           defaults: {},
-          editable: true,
+          editable: true, manageable: true,
           profileCapableProviders: ['claude', 'codex'],
           selections: {},
           profiles: WITH_WORK_ACCOUNT.profiles.filter((profile) => profile.isDefault),
@@ -695,6 +695,32 @@ describe('the agents form', () => {
         expect(
           document.querySelector('[data-slot="agents-account-missing"]')?.textContent,
         ).toContain('folder not created yet'))
+    })
+
+    it('where accounts are not managed, locks the other logins and says why — the one in force still picks', async () => {
+      // Spec 2026-10-04-hosted-agent-accounts: the selection route answers 409, so only the account
+      // this repo already uses is offered, and picking it writes nothing.
+      serve({
+        agentProfiles: {
+          ...WITH_WORK_ACCOUNT,
+          editable: false,
+          manageable: false,
+          selections: { '/repo': { claude: 'klaudiusz' } },
+          profiles: WITH_WORK_ACCOUNT.profiles.map(({ id, provider, label, isDefault }) => ({ id, provider, label, isDefault })),
+        },
+      })
+      renderAt('/settings/agents')
+
+      await waitFor(() => expect(rowFor('claude', 'klaudiusz')?.getAttribute('aria-checked')).toBe('true'))
+      expect(rowFor('claude', 'klaudiusz')?.disabled).toBe(false)
+      expect(rowFor('claude', '')?.disabled).toBe(true)
+      const reason = document.getElementById(rowFor('claude', '')?.getAttribute('aria-describedby') ?? '')
+      expect(reason?.getAttribute('data-slot')).toBe('agents-account-readonly')
+
+      fireEvent.click(rowFor('claude', 'klaudiusz')!)
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
+      expect(selections()).toHaveLength(0)
+      expect(puts()).toHaveLength(0)
     })
 
     it('says the account is personal, because everything else in this pane is shared', async () => {

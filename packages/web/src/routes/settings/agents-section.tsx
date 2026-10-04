@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { BotIcon } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
+import { useId, useState, type ReactNode } from 'react'
 
 import { putConfig } from '@/api/client'
 import {
@@ -359,6 +359,7 @@ function DefaultAgentField({
   const scope = useProjectScope()
   const repo = useRepo()
   const select = useSelectAgentProfile()
+  const readOnlyHintId = useId()
 
   // `projectId: null` is the boot project, which every route addresses by the reserved `default`
   // alias. The repo ROOT is the key the account store uses, and `useRepo` is project-scoped so it
@@ -390,6 +391,9 @@ function DefaultAgentField({
         // The account half needs a project to write against; the runner half does not, so only an
         // account row waits on the registry.
         accountDisabled={select.isPending || projects.data === undefined}
+        // Hosted: only the account in force stays pickable, and it writes the runner alone.
+        accountReadOnly={profiles.data?.manageable === false}
+        accountHintId={readOnlyHintId}
         onPick={(runner, account, hasAccountChoice) => {
           if (runner !== defaultRunner) onPick(runner)
           // Only when this agent HAS a choice of accounts: a single-login agent must not write a
@@ -413,6 +417,16 @@ function DefaultAgentField({
         <p className="max-w-md text-[13px] text-muted-foreground">
           Tasks already started under another account can’t be resumed here — their sessions live in
           that account’s folder.
+        </p>
+      ) : null}
+      {hasAccounts && profiles.data?.manageable === false ? (
+        <p
+          id={readOnlyHintId}
+          data-slot="agents-account-readonly"
+          className="max-w-md text-[13px] text-muted-foreground"
+        >
+          Which account this repo uses can’t be changed from this cockpit — account management is off
+          here. Each task can still pick any account.
         </p>
       ) : null}
     </Field>

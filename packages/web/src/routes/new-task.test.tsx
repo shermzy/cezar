@@ -2145,7 +2145,7 @@ describe('prompt templates on the new-task composer', () => {
 /** One extra Claude login beside the discovered defaults. */
 const ACCOUNTS: AgentProfilesResponse = {
   defaults: {},
-  editable: true,
+  editable: true, manageable: true,
   profileCapableProviders: ['claude', 'codex'],
   selections: {},
   profiles: [
