@@ -12,6 +12,8 @@
  *
  * Anywhere else — no desktop shell, not macOS, a program that does not resolve — the command is
  * returned untouched, so a missing binary still fails the spawn with the usual ENOENT and hint.
+ * The one exception: on Windows a node-script program (`.mjs`/`.cjs`/`.js`) is run by node, so a
+ * missing script there starts node and fails with "Cannot find module", not ENOENT and the hint.
  */
 import { accessSync, constants, statSync } from 'node:fs';
 import { delimiter, isAbsolute, join } from 'node:path';
@@ -33,6 +35,10 @@ export function disclaimedCommand(
   opts: DisclaimOptions = {},
 ): [string, string[]] {
   const platform = opts.platform ?? process.platform;
+  // Windows cannot execute a `#!` script — spawning one dies with EFTYPE — and the dry-run mock
+  // agent (`scripts/mock-claude.mjs`) is exactly that, so a node script runs through node there.
+  // No working behaviour changes: this path failed in every case before.
+  if (platform === 'win32' && /\.(mjs|cjs|js)$/i.test(program)) return [process.execPath, [program, ...args]];
   const trampoline = (opts.hostEnv ?? process.env).CEZ_DISCLAIM_EXEC;
   if (platform !== 'darwin' || !trampoline || !isExecutable(trampoline)) return [program, [...args]];
   const resolved = resolveProgram(program, childEnv?.PATH ?? process.env.PATH);

@@ -47,7 +47,16 @@ const STATUS_ORDER: Partial<Record<RunRecord['status'], number>> = {
  *  is the same rule the status pill and the sidebar bucket read (`lib/attention.ts`). */
 const SCHEDULED_WEIGHT = 3
 
-const statusWeight = (run: RunRecord): number =>
+/**
+ * What `sortRuns` reads — `Pick`ed, like `RunTitleInput` and `AttentionInput`, so the all-projects
+ * board's slim index rows (`RunIndexEntry`, which carry no `pinned`) sort by the very same rule as
+ * full records. `pinned` is optional because absent IS "not pinned" (#935).
+ */
+export type SortableRun = Pick<RunRecord, 'status' | 'autoResumeAt' | 'archived' | 'createdAt'> & {
+  pinned?: boolean
+}
+
+const statusWeight = (run: SortableRun): number =>
   run.status === 'failed' && run.autoResumeAt !== undefined
     ? SCHEDULED_WEIGHT
     : STATUS_ORDER[run.status] ?? 9
@@ -202,7 +211,7 @@ export function queuePositions(runs: readonly RunRecord[]): Map<string, number> 
  * ISO-8601 strings compare lexicographically because every timestamp cezar writes is UTC
  * (`toISOString()` → trailing `Z`), the same reason `read-state.ts` compares them directly.
  */
-export function sortRuns(runs: readonly RunRecord[], view: ListView): RunRecord[] {
+export function sortRuns<T extends SortableRun>(runs: readonly T[], view: ListView): T[] {
   return runs
     .filter((run) => (view === 'archived' ? run.archived : !run.archived))
     .sort((a, b) => {

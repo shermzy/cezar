@@ -1,6 +1,7 @@
 import {
   FolderIcon,
   FolderOpenIcon,
+  KanbanIcon,
   LayersIcon,
   LayoutDashboardIcon,
   MenuIcon,
@@ -642,21 +643,24 @@ function SidebarContent({
         {singleProject ? null : <AddProjectMenu />}
       </div>
 
-      {/* The first of the two top-level doors; `AllTasksLink` is the other. They share one skin
-          (SIDEBAR_SECTION_LINK_CLASS) because they stack directly against each other. */}
+      {/* The first of the three top-level doors; `AllTasksLink` and `AllBoardsLink` are the
+          others. They share one skin (SIDEBAR_SECTION_LINK_CLASS) because they stack directly
+          against each other. */}
       <div className="shrink-0 px-1.5">
         <DashboardLink onNavigate={onNavigate} />
       </div>
       {projectGroups ? (
         <>
-          {/* PINNED above the scroller, not the first row inside it. It is about every group
-              rather than a peer of them, and a workspace with enough projects to want this page
-              is exactly the workspace that scrolls it out of sight. Its own bordered band is
-              what stops it reading as an unusually-worded project. Only in a multi-project
-              workspace: with one project the page would be that project's own Tasks table
-              wearing a second name. */}
+          {/* PINNED above the scroller, not the first rows inside it. Both doors (All tasks and
+              All boards) are about every group rather than peers of them, and a workspace with
+              enough projects to want these pages is exactly the workspace that scrolls them out
+              of sight. Their own bordered band is what stops them reading as unusually-worded
+              projects. Only in a multi-project workspace: with one project All tasks would be
+              that project's own Tasks table, and All boards its own Board, each wearing a second
+              name. */}
           <div className="shrink-0 border-b border-border px-1.5 pt-0.5 pb-2">
             <AllTasksLink onNavigate={onNavigate} />
+            <AllBoardsLink onNavigate={onNavigate} />
           </div>
           {/* Step 3.3: one collapsible group per registered project — nav + task list per group.
               The whole area scrolls as one (per the sidebar mockup); collapsed groups are one row. */}
@@ -765,9 +769,9 @@ function SidebarContent({
 }
 
 /**
- * The shared skin of the sidebar's two top-level doors — Dashboard and All tasks. They stack
- * directly on top of each other, so they are peers and must be painted as one: the same row
- * height, the same type scale, the same violet icon.
+ * The shared skin of the sidebar's three top-level doors — Dashboard, All tasks and All boards.
+ * They stack directly on top of each other, so they are peers and must be painted as one: the
+ * same row height, the same type scale, the same violet icon.
  *
  * ONE constant rather than two copies on purpose. Dashboard shipped as its own inline class
  * string and drifted to `min-h-11`/`text-sm`/no icon colour, which read on desktop as an 8px
@@ -775,7 +779,7 @@ function SidebarContent({
  * land on both rows or on neither.
  *
  * Not the per-project nav rows below them: those are a lower tier (muted foreground, semibold
- * only when active, `md:h-[34px]`) and are deliberately NOT peers of these two.
+ * only when active, `md:h-[34px]`) and are deliberately NOT peers of these three.
  */
 const SIDEBAR_SECTION_LINK_CLASS =
   'flex h-11 w-full items-center gap-2.5 rounded-md px-2.5 text-[13.5px] font-semibold text-foreground transition-colors hover:bg-muted md:h-9'
@@ -839,6 +843,32 @@ function AllTasksLink({ onNavigate }: { onNavigate?: () => void }) {
     >
       <LayersIcon className={sidebarSectionIconClass(isActive)} aria-hidden="true" />
       All tasks
+    </RouterLink>
+  )
+}
+
+/**
+ * The way into the all-projects board (`/board`, spec 2026-10-04-kanban-board § Phase 1b) — every
+ * project's board as one swimlane each.
+ *
+ * A PLAIN router Link, like `AllTasksLink` beside it and for the same reason: the page sits
+ * outside every project, and the scoped `Link` would prefix it with the active `/p/<id>`, which
+ * would open that project's own board instead. Lit on exactly `/board`, never on a project's
+ * `/p/<id>/board`.
+ */
+function AllBoardsLink({ onNavigate }: { onNavigate?: () => void }) {
+  const { pathname } = useLocation()
+  const isActive = pathname === '/board'
+  return (
+    <RouterLink
+      to="/board"
+      data-slot="all-boards-link"
+      onClick={onNavigate}
+      aria-current={isActive ? 'page' : undefined}
+      className={cn(SIDEBAR_SECTION_LINK_CLASS, isActive && 'bg-muted')}
+    >
+      <KanbanIcon className={sidebarSectionIconClass(isActive)} aria-hidden="true" />
+      All boards
     </RouterLink>
   )
 }

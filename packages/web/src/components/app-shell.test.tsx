@@ -131,6 +131,7 @@ describe('AppShell', () => {
     const links = within(nav()).getAllByRole('link')
     expect(links.map((a) => a.textContent)).toEqual([
       'Tasks',
+      'Board',
       'Inbox',
       'Git',
       'GitHub',
@@ -142,6 +143,7 @@ describe('AppShell', () => {
     // Deep-linkable per Step 2.1: every nav row is an <a href>, not a button with an onClick.
     expect(links.map((a) => a.getAttribute('href'))).toEqual([
       '/',
+      '/board',
       '/inbox',
       '/git',
       '/github',
@@ -478,6 +480,8 @@ describe('AppShell', () => {
     it('is absent without project groups — one project needs no "all projects" door', () => {
       renderShell()
       expect(allTasks()).toBeNull()
+      // Nor its board sibling: both all-projects doors follow the same multi-project gate.
+      expect(document.querySelector('[data-slot="all-boards-link"]')).toBeNull()
     })
 
     it('links out of every project scope', () => {
@@ -504,26 +508,48 @@ describe('AppShell', () => {
     })
   })
 
+  /** The all-projects board's door (spec 2026-10-04-kanban-board § Phase 1b) — the All tasks
+   *  door's rules, plus one of its own: a project's OWN board is not the all-projects board. */
+  describe('All boards link (multi-project only)', () => {
+    const allBoards = () => document.querySelector('[data-slot="all-boards-link"]') as HTMLElement | null
+
+    it('links out of every project scope', () => {
+      renderShell('/p/shop/git', { projectGroups: <p>groups</p> })
+      // A PLAIN target: the scope-aware Link would make it `/p/shop/board`, that project's board.
+      expect(allBoards()!.getAttribute('href')).toBe('/board')
+    })
+
+    it("marks itself the current page on /board, never on a project's own /p/<id>/board", () => {
+      renderShell('/board', { projectGroups: <p>groups</p> })
+      expect(allBoards()!.getAttribute('aria-current')).toBe('page')
+      cleanup()
+      renderShell('/p/shop/board', { projectGroups: <p>groups</p> })
+      expect(allBoards()!.getAttribute('aria-current')).toBeNull()
+    })
+  })
+
   /**
-   * Dashboard and All tasks stack directly against each other, so they are peers: one row
-   * height, one type scale, one violet icon. Dashboard shipped with its own inline class string
-   * and drifted to a taller row with a grey icon; these pin the pair together.
+   * Dashboard, All tasks and All boards stack directly against each other, so they are peers: one
+   * row height, one type scale, one violet icon. Dashboard shipped with its own inline class
+   * string and drifted to a taller row with a grey icon; these pin the three together.
    */
   describe('top-level doors read as peers', () => {
     const dashboard = () => document.querySelector('[data-slot="dashboard-link"]') as HTMLElement
     const allTasks = () => document.querySelector('[data-slot="all-tasks-link"]') as HTMLElement
+    const allBoards = () => document.querySelector('[data-slot="all-boards-link"]') as HTMLElement
 
-    /** The shared skin, minus the active-state background either row adds on its own page. */
+    /** The shared skin, minus the active-state background any row adds on its own page. */
     const skin = (el: HTMLElement) => [...el.classList].filter(c => c !== 'bg-muted').sort()
 
-    it('paints both rows from the same class string', () => {
+    it('paints all three rows from the same class string', () => {
       renderShell('/', { projectGroups: <p>groups</p> })
       expect(skin(dashboard())).toEqual(skin(allTasks()))
+      expect(skin(allBoards())).toEqual(skin(allTasks()))
     })
 
-    it('gives both rows the touch height that relaxes to 36px on desktop', () => {
+    it('gives all three rows the touch height that relaxes to 36px on desktop', () => {
       renderShell('/', { projectGroups: <p>groups</p> })
-      for (const row of [dashboard(), allTasks()]) {
+      for (const row of [dashboard(), allTasks(), allBoards()]) {
         expect(row.classList.contains('h-11')).toBe(true)
         expect(row.classList.contains('md:h-9')).toBe(true)
         // The drifted Dashboard row was `min-h-11` with no desktop override — 8px taller than
@@ -532,9 +558,9 @@ describe('AppShell', () => {
       }
     })
 
-    it('gives both icons the violet accent', () => {
+    it('gives all three icons the violet accent', () => {
       renderShell('/', { projectGroups: <p>groups</p> })
-      for (const row of [dashboard(), allTasks()]) {
+      for (const row of [dashboard(), allTasks(), allBoards()]) {
         const icon = row.querySelector('svg') as SVGElement
         expect(icon).not.toBeNull()
         expect(icon.getAttribute('class')).toContain('text-violet/70')

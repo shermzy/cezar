@@ -4,6 +4,7 @@ import {
   ListChecksIcon,
   SettingsIcon,
   SparklesIcon,
+  SquareKanbanIcon,
   WorkflowIcon,
   ZapIcon,
   TicketIcon,
@@ -47,6 +48,7 @@ export type NavItem = {
  */
 export const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Tasks', icon: ListChecksIcon, match: ['/', '/tasks', '/compare'], badge: 'tasks-unread' },
+  { to: '/board', label: 'Board', icon: SquareKanbanIcon, match: ['/board'] },
   { to: '/inbox', label: 'Inbox', icon: InboxIcon, match: ['/inbox'], badge: 'inbox-count', inbox: true },
   { to: '/git', label: 'Git', icon: GitBranchIcon, match: ['/git'] },
   { to: '/github', label: 'GitHub', icon: GithubIcon, match: ['/github'], forge: true },

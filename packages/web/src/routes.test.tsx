@@ -163,6 +163,9 @@ function currentHash(): string | null {
 describe('pageTitleContext', () => {
   it.each([
     ['/p/cezar/', 'Tasks'],
+    // The project's own board, and the top-level all-projects board — one path apart, two titles.
+    ['/p/cezar/board', 'Board'],
+    ['/board', 'All boards'],
     ['/new', 'New task'],
     ['/p/cezar/compare/group-1', 'Compare'],
     ['/p/cezar/git', 'Git'],

@@ -1,6 +1,8 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, readFileSync, statSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { closeSync, mkdirSync, openSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 
 /**
  * The agent-browser provider seam. Every e2e spec drives the app through this module and
@@ -112,6 +114,41 @@ export async function bootProjectId(baseUrl: string): Promise<string> {
   return bootProject
 }
 
+/** What the CLI wrote to a capture file — `''` when it cannot be read. Never throws. */
+function readCapture(file: string): string {
+  try {
+    return readFileSync(file, 'utf8')
+  } catch {
+    return ''
+  }
+}
+
+/** The CLI's result envelope: `{ success, data?, error? }`. */
+type CliResult = { success: boolean; data?: unknown; error?: unknown }
+
+/** The result line of an agent-browser run — the last stdout line that JSON-parses to an object
+ *  with a boolean `success` — or `undefined` when there is none. Never throws. */
+function parseResult(stdout: string): CliResult | undefined {
+  const lines = stdout.split('\n').reverse()
+  for (const line of lines) {
+    const text = line.trim()
+    if (!text.startsWith('{')) continue
+    try {
+      const value = JSON.parse(text) as unknown
+      if (
+        typeof value === 'object' &&
+        value !== null &&
+        typeof (value as { success?: unknown }).success === 'boolean'
+      ) {
+        return value as CliResult
+      }
+    } catch {
+      /* a log line that only looks like JSON */
+    }
+  }
+  return undefined
+}
+
 export class AgentBrowser {
   // A unique session per run, per the descriptor's rules — never attach to a user's profile.
   private constructor(
@@ -129,18 +166,63 @@ export class AgentBrowser {
 
   /** One agent-browser invocation. `--json` on every call so results are parsed, not scraped. */
   private run(args: string[]): Record<string, unknown> {
+    // The CLI writes to temp FILES, never pipes. Node waits for EOF only on pipes it creates; it
+    // never waits on an fd it hands to the child, so the browser daemon that a session's first
+    // command launches — and that inherits these fds — cannot hold the call open (a piped
+    // `execFileSync` hangs until its timeout on Windows). stderr gets its own file so log lines
+    // from the CLI or the daemon cannot end up inside the JSON we parse.
+    const base = join(tmpdir(), `agent-browser-${process.pid}-${randomUUID()}`)
+    const outFile = `${base}.out`
+    const errFile = `${base}.err`
+    const outFd = openSync(outFile, 'w')
+    const errFd = openSync(errFile, 'w')
     let stdout: string
+    // The CLI exited cleanly. A failed call carries its stderr inside the thrown message, so only a
+    // successful one forwards it — otherwise a failure prints the same text twice.
+    let exitedCleanly = false
     try {
-      stdout = execFileSync(this.bin, ['--session', this.session, ...args, '--json'], {
-        encoding: 'utf8',
-        // A hung browser must fail the spec, not the whole suite's wall clock.
-        timeout: 60_000,
-        maxBuffer: 32 * 1024 * 1024,
-      })
+      try {
+        execFileSync(this.bin, ['--session', this.session, ...args, '--json'], {
+          stdio: ['ignore', outFd, errFd],
+          // A hung browser must fail the spec, not the whole suite's wall clock.
+          timeout: 60_000,
+        })
+      } finally {
+        closeSync(outFd)
+        closeSync(errFd)
+      }
+      stdout = readFileSync(outFile, 'utf8')
+      exitedCleanly = true
     } catch (cause) {
-      throw new Error(`cezar e2e: agent-browser ${args.join(' ')} failed`, { cause })
+      // The CLI's own words are the point of the message: stdout carries its JSON verdict, stderr
+      // whatever it said on the way out.
+      const said = readCapture(outFile).trim()
+      const complained = readCapture(errFile).trim()
+      throw new Error(
+        `cezar e2e: agent-browser ${args.join(' ')} failed: ${said}${complained ? `\nstderr: ${complained}` : ''}`,
+        { cause },
+      )
+    } finally {
+      // stderr used to reach the parent's stderr; keep it visible.
+      if (exitedCleanly) {
+        const stderr = readCapture(errFile)
+        if (stderr) process.stderr.write(stderr)
+      }
+      for (const file of [outFile, errFile]) {
+        try {
+          rmSync(file, { force: true })
+        } catch {
+          /* temp file; never mask the real result */
+        }
+      }
     }
-    const parsed = JSON.parse(stdout) as { success: boolean; data?: unknown; error?: unknown }
+    // The daemon a session's first call spawns shares the fds and may append log lines — some of
+    // them JSON-shaped — so the answer is the LAST stdout line that parses to the CLI's result
+    // envelope (an object with a boolean `success`), not the last line that merely starts with `{`.
+    const parsed = parseResult(stdout)
+    if (!parsed) {
+      throw new Error(`cezar e2e: agent-browser ${args.join(' ')} returned non-JSON: ${stdout}`)
+    }
     if (!parsed.success) {
       throw new Error(`cezar e2e: agent-browser ${args.join(' ')} → ${JSON.stringify(parsed.error)}`)
     }

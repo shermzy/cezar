@@ -52,6 +52,7 @@ beforeAll(async () => {
 function expectedNavLabels(): string[] {
   return [
     'Tasks',
+    'Board',
     ...(followupsAvailable ? ['Inbox'] : []),
     'Git',
     ...(forgeAvailable ? ['GitHub'] : []),

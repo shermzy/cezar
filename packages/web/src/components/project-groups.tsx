@@ -28,7 +28,7 @@ import { ReferenceStatusProvider } from '@/components/reference-status'
 import { QuickListBuckets } from '@/components/task-quick-list'
 import { toast } from '@/components/ui/toaster'
 import { Link, pathnameProjectId, scopeTo, stripProjectPrefix, useProjectMatch } from '@/lib/project-router'
-import { moveProjectId, orderProjects } from '@/lib/project-order'
+import { moveProjectId, orderSidebarProjects } from '@/lib/project-order'
 import { isProjectCollapsed, readStoredCollapsed, writeStoredCollapsed } from '@/lib/sidebar-collapse'
 import { capBuckets, groupRuns, listCounts, type ListView } from '@/lib/task-groups'
 import { useProjectOrder } from '@/lib/use-project-order'
@@ -155,23 +155,14 @@ export function ProjectGroups({
   const health = useHealth()
   const metricVisibility = usageMetricVisibility(health.data)
 
-  // The user's hand-picked order when there is one, `lastOpenedAt` when there is not (#952).
-  // Applied here rather than trusted from the wire so the order is a property of the sidebar, not
-  // of whichever route last touched the registry — and shared with the ⌘K palette through
-  // `lib/project-order.ts`, so the same registry is never listed two ways.
+  // The user's hand-picked order when there is one, `lastOpenedAt` when there is not (#952), with
+  // an unregistered boot folder leading. Applied here rather than trusted from the wire so the
+  // order is a property of the sidebar, not of whichever route last touched the registry — and
+  // shared through `lib/project-order.ts` with the ⌘K palette (`orderProjects`) and the
+  // all-projects board's lanes (`orderSidebarProjects`), so the same registry is never listed
+  // two ways.
   const { order, canReorder, setOrder } = useProjectOrder()
-  const ordered = React.useMemo(() => {
-    const placed = orderProjects(projects, order)
-    // An UNREGISTERED boot folder leads, ahead of BOTH rules above it: it has no `lastOpenedAt`
-    // to sort by (it was never written down, so the recency sort would bury it last) and no
-    // registry entry to be placed by hand. Defensive today — `/api/v1/projects` only lists that
-    // row while the registry is EMPTY, and one project never reaches this grouped sidebar — but
-    // the ordering must not depend on that. A stable partition, so the result is still a
-    // permutation of the input.
-    const lead = placed.filter((project) => project.unregistered)
-    if (lead.length === 0) return placed
-    return [...lead, ...placed.filter((project) => !project.unregistered)]
-  }, [projects, order])
+  const ordered = React.useMemo(() => orderSidebarProjects(projects, order), [projects, order])
   const orderedIds = React.useMemo(() => ordered.map((project) => project.id), [ordered])
 
   // dnd-kit, configured exactly as the workflow builder's step list (`routes/workflows`): the

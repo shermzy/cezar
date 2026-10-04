@@ -36,3 +36,39 @@ describe('disclaimedCommand', () => {
     expect(disclaimedCommand('./claude', [], { PATH: dir }, darwin)).toEqual(['./claude', []]);
   });
 });
+
+// Windows cannot execute a `#!` script, so spawning one directly dies with EFTYPE; the dry-run
+// mock agent (`scripts/mock-claude.mjs`) is exactly that. Node scripts go through node there.
+describe('disclaimedCommand on Windows', () => {
+  const win32 = { platform: 'win32' as const, hostEnv: {} };
+
+  it('runs a node-script agent binary through node', () => {
+    expect(disclaimedCommand('C:\\x\\mock-claude.mjs', ['-p', 'hi'], {}, win32))
+      .toEqual([process.execPath, ['C:\\x\\mock-claude.mjs', '-p', 'hi']]);
+    expect(disclaimedCommand('C:\\x\\mock-claude.mjs', [], {}, win32))
+      .toEqual([process.execPath, ['C:\\x\\mock-claude.mjs']]);
+  });
+
+  it('matches the script extension case-insensitively, for .cjs and .js too', () => {
+    expect(disclaimedCommand('C:\\x\\agent.CJS', ['a'], {}, win32)).toEqual([process.execPath, ['C:\\x\\agent.CJS', 'a']]);
+    expect(disclaimedCommand('C:\\x\\agent.js', ['a'], {}, win32)).toEqual([process.execPath, ['C:\\x\\agent.js', 'a']]);
+    expect(disclaimedCommand('C:\\x\\agent.MJS', [], {}, win32)).toEqual([process.execPath, ['C:\\x\\agent.MJS']]);
+  });
+
+  it('leaves a real executable alone', () => {
+    expect(disclaimedCommand('claude.exe', ['-p', 'x'], {}, win32)).toEqual(['claude.exe', ['-p', 'x']]);
+    expect(disclaimedCommand('claude', ['-p'], {}, win32)).toEqual(['claude', ['-p']]);
+    expect(disclaimedCommand('C:\\x\\agent.mjs.exe', [], {}, win32)).toEqual(['C:\\x\\agent.mjs.exe', []]);
+  });
+
+  it('does not apply off Windows, where the shebang runs', () => {
+    expect(disclaimedCommand('/x/mock-claude.mjs', ['-p'], {}, { platform: 'linux', hostEnv: {} }))
+      .toEqual(['/x/mock-claude.mjs', ['-p']]);
+  });
+
+  it('leaves the macOS trampoline route untouched for a node script', () => {
+    // Forward slashes, so the darwin branch resolves the path the same way on any test host.
+    const script = exe('mock-claude.mjs').replaceAll('\\', '/');
+    expect(disclaimedCommand(script, ['-p'], {}, darwin)).toEqual([trampoline, [DISCLAIM_EXEC_FLAG, script, '-p']]);
+  });
+});

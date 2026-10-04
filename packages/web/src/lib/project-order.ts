@@ -77,6 +77,34 @@ export function orderProjects<T extends OrderableProject>(
   return [...byRecency(rest), ...picked]
 }
 
+/** A registry row as the SIDEBAR orders it: the recency/hand-picked fields, plus the flag the
+ *  server sets on the synthetic row for an unregistered boot folder (`ProjectListEntry`). */
+export type SidebarProject = OrderableProject & { unregistered?: boolean }
+
+/**
+ * The sidebar's whole order: `orderProjects`, then an UNREGISTERED boot folder in front of
+ * everything.
+ *
+ * The boot folder leads ahead of BOTH rules: it has no `lastOpenedAt` to sort by (it was never
+ * written down, so the recency sort would bury it last) and no registry entry to be placed by
+ * hand. `/api/v1/projects` only lists that row while the registry is EMPTY, so in practice it is
+ * the only row — but the order must not depend on that. A stable partition, so the result is
+ * still a permutation of the input.
+ *
+ * One function for the two surfaces that list the registry as lanes or groups — the sidebar's
+ * project groups and the all-projects board (spec `2026-10-04-kanban-board.md` § Phase 1b) — so
+ * they can never disagree about which project comes first.
+ */
+export function orderSidebarProjects<T extends SidebarProject>(
+  projects: readonly T[],
+  storedOrder: readonly string[],
+): T[] {
+  const placed = orderProjects(projects, storedOrder)
+  const lead = placed.filter((project) => project.unregistered)
+  if (lead.length === 0) return placed
+  return [...lead, ...placed.filter((project) => !project.unregistered)]
+}
+
 /**
  * The list to persist after a drag: the id at `from` lifted out and dropped at `to`.
  *

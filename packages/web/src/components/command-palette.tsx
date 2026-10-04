@@ -1,4 +1,4 @@
-import { CheckIcon, FolderOpenIcon, LayersIcon, MoonIcon, PlusIcon } from 'lucide-react'
+import { CheckIcon, FolderOpenIcon, KanbanIcon, LayersIcon, MoonIcon, PlusIcon } from 'lucide-react'
 import * as React from 'react'
 import { useNavigate as useRouterNavigate } from 'react-router'
 import { useHealth, useProjects, useRunsForProject, useRunsIndex, useSkills, useUiState } from '@/api/queries'
@@ -437,9 +437,9 @@ function PaletteContent({ close }: { close: () => void }) {
         ) : null}
 
         <CommandGroup heading="Views">
-          {/* The one GLOBAL view, listed first because it is the only row here that is not
-              about the project you are standing in. Multi-project only, matching the sidebar:
-              with one project it would be that project's own Tasks page under another name. */}
+          {/* The two GLOBAL views, listed first because they are the only rows here that are not
+              about the project you are standing in. Multi-project only, matching the sidebar's
+              doors: with one project each would be that project's own page under another name. */}
           {multiProject ? (
             <CommandItem
               value="view All tasks"
@@ -449,6 +449,22 @@ function PaletteContent({ close }: { close: () => void }) {
             >
               <LayersIcon aria-hidden="true" />
               All tasks
+            </CommandItem>
+          ) : null}
+          {multiProject ? (
+            <CommandItem
+              value="view All boards"
+              data-slot="palette-view"
+              data-nav-to="/board"
+              // `/board` is ALSO the per-project Board row's `data-nav-to` below; this marks the
+              // workspace-level one apart from it.
+              data-nav-scope="global"
+              // `goGlobal`: the scoped navigate would turn `/board` into the ACTIVE project's own
+              // board — the per-project Board row below already offers that.
+              onSelect={() => goGlobal('/board')}
+            >
+              <KanbanIcon aria-hidden="true" />
+              All boards
             </CommandItem>
           ) : null}
           {visibleNavItems({

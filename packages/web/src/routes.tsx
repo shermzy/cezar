@@ -14,6 +14,8 @@ import { ProjectScopeProvider } from './api/project-scope-context'
 import { bareRootLanding, locationToRestore, readStoredLastLocation } from './lib/last-location'
 import { Navigate as ScopedNavigate, stripProjectPrefix } from './lib/project-router'
 import { AutomationsLoading } from './routes/automations/automations-loading'
+import { AllBoardsRoute } from './routes/board/all-boards-route'
+import { BoardRoute } from './routes/board/board-route'
 import { CompareLoading } from './routes/compare-loading'
 import { GithubLoading } from './routes/github/github-loading'
 import { InboxRoute } from './routes/inbox'
@@ -291,6 +293,7 @@ export interface PageTitleContext {
 
 const PAGE_TITLE_ROUTES = [
   { pattern: '/', pageLabel: 'Tasks' },
+  { pattern: '/board', pageLabel: 'Board' },
   // The global page. It is not project-scoped, so it never carries a `/p/` prefix to strip —
   // but it goes through the same table, because the browser title is one mechanism.
   { pattern: '/tasks', pageLabel: 'All tasks' },
@@ -309,6 +312,10 @@ const PAGE_TITLE_ROUTES = [
 
 /** Browser-title context from the project-relative route map; raw ids are lookup keys only. */
 export function pageTitleContext(pathname: string): PageTitleContext {
+  // The all-projects board is EXACTLY the top-level `/board` (spec 2026-10-04-kanban-board
+  // § Phase 1b). Matched before the prefix strip: afterwards `/p/<id>/board` and `/board` are the
+  // same string, and the scoped `Board` entry below would claim both.
+  if (matchPath({ path: '/board', end: true }, pathname)) return { pageLabel: 'All boards', taskId: null }
   const projectPath = stripProjectPrefix(pathname)
   const task = matchPath({ path: '/tasks/:id/*', end: true }, projectPath)
   if (task) return { pageLabel: null, taskId: task.params.id ?? null }
@@ -336,6 +343,7 @@ export const AppRoutes = memo(function AppRoutes() {
       <Route path="/p/:projectId" element={<ProjectScopeRoute />}>
         <Route index element={<TasksOverviewRoute />} />
         <Route path="new" element={<NewTaskProjectRoute />} />
+        <Route path="board" element={<BoardRoute />} />
 
         <Route
           path="tasks/:id"
@@ -584,6 +592,12 @@ export const AppRoutes = memo(function AppRoutes() {
           keep redirecting to the boot project's thread (`LegacyPathRedirect` below owns it).
           React Router ranks this static segment above that `*`, so the two never compete. */}
       <Route path="/tasks" element={<GlobalTasksRoute />} />
+      {/* The all-projects board (spec 2026-10-04-kanban-board § Phase 1b) — every project's
+          board as one swimlane each, outside `/p/:projectId` for the same reason as `/tasks`.
+          The board never existed as a flat URL, so this static segment takes nothing from
+          `LegacyPathRedirect` that a link relied on; the scoped `/p/:projectId/board` above is
+          unchanged. */}
+      <Route path="/board" element={<AllBoardsRoute />} />
       <Route path="/dashboard" element={<Suspense fallback={<div role="status" className="p-6 text-sm text-muted-foreground">Loading dashboard…</div>}><DashboardRoute /></Suspense>} />
 
       {/* Global settings (multi-project spec, step 3.5) — the one cockpit area that is NOT

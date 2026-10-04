@@ -52,6 +52,7 @@ function expectedNavHrefs(project: ProjectListEntry): string[] {
   const projectId = project.id
   return [
     scoped(projectId, '/'),
+    scoped(projectId, '/board'),
     ...(followupsAvailable ? [scoped(projectId, '/inbox')] : []),
     scoped(projectId, '/git'),
     ...(project.forge === 'github' ? [scoped(projectId, '/github')] : []),

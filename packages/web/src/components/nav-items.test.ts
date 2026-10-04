@@ -68,6 +68,7 @@ describe('NAV_ITEMS', () => {
   it('is the nav from the spec, in mockup order', () => {
     expect(NAV_ITEMS.map((item) => item.label)).toEqual([
       'Tasks',
+      'Board',
       'Inbox',
       'Git',
       'GitHub',
@@ -99,7 +100,7 @@ describe('visibleNavItems', () => {
 
   it('with everything available, the full nav renders', () => {
     expect(labelsOf({ forge: true, inbox: true, automations: true, tracker: 'jira' })).toEqual([
-      'Tasks', 'Inbox', 'Git', 'GitHub', 'Jira', 'Automations', 'Skills', 'Workflows', 'Settings',
+      'Tasks', 'Board', 'Inbox', 'Git', 'GitHub', 'Jira', 'Automations', 'Skills', 'Workflows', 'Settings',
     ])
   })
 
@@ -112,6 +113,7 @@ describe('visibleNavItems', () => {
   it('without a forge, only the GitHub item drops out — a schedule needs no remote', () => {
     expect(labelsOf({ forge: false, inbox: true, automations: true })).toEqual([
       'Tasks',
+      'Board',
       'Inbox',
       'Git',
       'Automations',
@@ -124,6 +126,7 @@ describe('visibleNavItems', () => {
   it('without the inbox, exactly the Inbox item drops out (#471)', () => {
     expect(labelsOf({ forge: true, inbox: false, automations: true })).toEqual([
       'Tasks',
+      'Board',
       'Git',
       'GitHub',
       'Automations',
@@ -136,6 +139,7 @@ describe('visibleNavItems', () => {
   it('opted out of automations, exactly the Automations item drops out', () => {
     expect(labelsOf({ forge: true, inbox: true, automations: false })).toEqual([
       'Tasks',
+      'Board',
       'Inbox',
       'Git',
       'GitHub',
@@ -154,6 +158,7 @@ describe('visibleNavItems', () => {
   it('drops all three when nothing is available', () => {
     expect(labelsOf({ forge: false, inbox: false, automations: false })).toEqual([
       'Tasks',
+      'Board',
       'Git',
       'Skills',
       'Workflows',
