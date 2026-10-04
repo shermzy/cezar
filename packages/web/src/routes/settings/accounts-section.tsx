@@ -170,7 +170,7 @@ function AccountsPane({ data }: { data: AgentProfilesResponse }) {
             reading surface only — every write, and the per-account probe, answers 409. */}
         {data.manageable ? null : (
           <p data-slot="accounts-readonly" className="mt-1 text-[13px] text-soft-foreground">
-            Account management is off for this cockpit.
+            Account management is off for this cockpit (<code className="text-[12px]">CEZ_HOSTED_ACCOUNTS</code>).
           </p>
         )}
       </div>
@@ -214,6 +214,7 @@ function AccountsPane({ data }: { data: AgentProfilesResponse }) {
           onOpenChange={(open) => !open && setAdding(null)}
           providers={data.profileCapableProviders}
           initialProvider={adding}
+          hosted={!data.editable}
         />
       ) : null}
 
@@ -650,6 +651,9 @@ function AccountDetails({
   const [renaming, setRenaming] = useState(false)
   const [draft, setDraft] = useState(account.label)
   const rename = useUpdateAgentProfile()
+  // What Save would call this login. A discovered login's empty name IS `Default` (the server clears
+  // it), so emptying the field undoes its rename; an added account must keep a name.
+  const nextLabel = account.isDefault ? draft.trim() || 'Default' : draft.trim()
 
   // Which detected apps can actually act on each thing — the same rule the route enforces, so the
   // menu never offers something that would come back a 400. A `cli:<runner>` handoff opens a task
@@ -743,66 +747,71 @@ function AccountDetails({
         </div>
       ) : null}
 
-      {/* The discovered account carries no Rename/Remove at all — it is what cezar found, so either
-          would imply a setting that does not exist. Nothing is rendered for it, not a disabled
-          control, because a greyed-out Remove reads as "not allowed yet" rather than "not a thing". */}
-      {account.isDefault ? null : (
-        <div
-          data-slot="account-manage"
-          className="mt-3 flex flex-wrap items-center gap-2 border-t border-border/60 pt-2.5"
-        >
-          <span className="mr-1 text-xs text-muted-foreground">Account</span>
-          {renaming ? (
-            <>
-              <input
-                type="text"
-                autoFocus
-                aria-label={`Name for ${account.label}`}
-                data-slot="account-rename-input"
-                value={draft}
-                onChange={(event) => setDraft(event.target.value)}
-                className="w-48 rounded-md border border-input bg-card px-2 py-1 text-xs outline-none focus-visible:border-ring"
-              />
-              <Button
-                type="button"
-                size="sm"
-                data-action="account-rename-save"
-                disabled={rename.isPending || draft.trim() === '' || draft.trim() === account.label}
-                onClick={() =>
-                  rename.mutate(
-                    { id: account.id, label: draft.trim() },
-                    {
-                      onSuccess: () => setRenaming(false),
-                      onError: (error) => toast(error.message, { tone: 'danger' }),
-                    },
-                  )
-                }
-              >
-                Save
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  setDraft(account.label)
-                  setRenaming(false)
-                }}
-              >
-                Cancel
-              </Button>
-            </>
-          ) : (
-            <>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                data-action="account-rename"
-                onClick={() => setRenaming(true)}
-              >
-                Rename
-              </Button>
+      {/* Every login can be renamed — a name is cezar's own, the discovered account's included (spec
+          2026-10-04-hosted-agent-accounts § Renaming the Default logins). The discovered account
+          carries no Remove: it is what cezar found, so removing it would imply a setting that does
+          not exist. Nothing is rendered for it, not a disabled control, because a greyed-out Remove
+          reads as "not allowed yet" rather than "not a thing". */}
+      <div
+        data-slot="account-manage"
+        className="mt-3 flex flex-wrap items-center gap-2 border-t border-border/60 pt-2.5"
+      >
+        <span className="mr-1 text-xs text-muted-foreground">Account</span>
+        {renaming ? (
+          <>
+            <input
+              type="text"
+              autoFocus
+              aria-label={`Name for ${account.label}`}
+              data-slot="account-rename-input"
+              value={draft}
+              placeholder={account.isDefault ? 'Default' : undefined}
+              onChange={(event) => setDraft(event.target.value)}
+              className="w-48 rounded-md border border-input bg-card px-2 py-1 text-xs outline-none focus-visible:border-ring"
+            />
+            <Button
+              type="button"
+              size="sm"
+              data-action="account-rename-save"
+              disabled={rename.isPending || nextLabel === '' || nextLabel === account.label}
+              onClick={() =>
+                rename.mutate(
+                  // `routeId`, never `account.id`: every discovered account's id is `default`, and
+                  // only `default:<provider>` says whose name this is.
+                  { id: routeId, label: draft.trim() },
+                  {
+                    onSuccess: () => setRenaming(false),
+                    onError: (error) => toast(error.message, { tone: 'danger' }),
+                  },
+                )
+              }
+            >
+              Save
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setDraft(account.label)
+                setRenaming(false)
+              }}
+            >
+              Cancel
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              data-action="account-rename"
+              onClick={() => setRenaming(true)}
+            >
+              Rename
+            </Button>
+            {account.isDefault ? null : (
               <Button
                 type="button"
                 variant="outline"
@@ -812,15 +821,17 @@ function AccountDetails({
               >
                 Remove
               </Button>
-              {/* The label is cezar's own; the folder is the account. Saying so here is what keeps
-                  Rename from reading as "point this at a different directory". */}
-              <span className="text-xs text-muted-foreground">
-                Renaming changes what cezar calls this account, not its folder.
-              </span>
-            </>
-          )}
-        </div>
-      )}
+            )}
+            {/* The label is cezar's own; the folder is the account. Saying so here is what keeps
+                Rename from reading as "point this at a different directory". */}
+            <span className="text-xs text-muted-foreground">
+              {account.isDefault
+                ? 'Renaming changes what cezar calls this login, not which login it is.'
+                : 'Renaming changes what cezar calls this account, not its folder.'}
+            </span>
+          </>
+        )}
+      </div>
     </div>
   )
 }

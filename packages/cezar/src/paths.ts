@@ -124,6 +124,15 @@ export function agentAccountsPath(): string {
 }
 
 /**
+ * Where a hosted cockpit keeps the folders it allocates for agent accounts (spec
+ * 2026-10-04-hosted-agent-accounts H2): one `<provider>/<id>/` per account, created `0700`, never
+ * reused and never deleted by cezar.
+ */
+export function managedAccountsDir(): string {
+  return join(cezarHomeDir(), 'accounts');
+}
+
+/**
  * Expand a leading `~` to the user's home. Lives here with the other homedir
  * logic (see the module note above — one place owns `homedir()`): the
  * workspace browse/checkout roots are stored as the user wrote them (a literal `~`), so

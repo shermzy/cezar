@@ -29,7 +29,7 @@ import {
 } from '../automations/types.ts';
 import { trackerTriggerSchema, trackerAutomationOptionsSchema, trackerAutomationOptionsQuerySchema, automationScheduleSchema, localTimeZone, nextOccurrence } from '@open-mercato/cezar-contract';
 import type { IncomingMessage } from 'node:http';
-import { access, constants as fsConstants, mkdir, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
+import { access, constants as fsConstants, mkdir, readFile, realpath, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -167,6 +167,7 @@ import {
 import {
   CONTROL_CHARS_RE,
   DEFAULT_AGENT_ACCOUNT_ID,
+  allocateManagedAccountDir,
   defaultAgentAccountStore,
   isAbsoluteConfigDir,
   loadAgentAccounts,
@@ -350,10 +351,25 @@ const providerConnectSchema = z.object({
 /** Agent-account bodies (spec 2026-07-29-agent-profiles). Bounds mirror `agentProfileSchema` in
  *  src/workspace/config.ts exactly, so a value these accept can never be degraded away by the
  *  next load's `.catch`. The id is allocated server-side and is never a request field. */
+/**
+ * An account's name — a Default login's too (spec 2026-10-04-hosted-agent-accounts § Renaming the
+ * Default logins): trimmed, at most 200 characters, and NO control characters. It is a line of text
+ * the page, the composer's pill and (hosted) the allocated folder's slug are all built from. The
+ * control-character rule reads the RAW value, so a trailing newline is refused rather than trimmed
+ * into acceptance.
+ */
+const accountLabelSchema = z
+  .string()
+  .refine((v) => !CONTROL_CHARS_RE.test(v), 'label must not contain control characters')
+  .trim()
+  .max(200);
+
 const createAgentProfileSchema = z.object({
   provider: z.enum(PROVIDER_IDS),
-  label: z.string().trim().max(200).optional(),
-  configDir: z.string().trim().min(1).max(4096),
+  label: accountLabelSchema.optional(),
+  /** Required on a local cockpit and refused on a hosted one, where cezar allocates the folder —
+   *  the handler knows which mode it is in, so it checks (spec 2026-10-04-hosted-agent-accounts). */
+  configDir: z.string().trim().min(1).max(4096).optional(),
 }).strict();
 
 /** `POST …/agent-profiles/:id/open` — a catalog id (or `folder`) plus an optional open target. */
@@ -363,7 +379,7 @@ const openAgentAccountFileSchema = z.object({
 }).strict();
 
 const updateAgentProfileSchema = z.object({
-  label: z.string().trim().max(200).optional(),
+  label: accountLabelSchema.optional(),
   configDir: z.string().trim().min(1).max(4096).optional(),
 }).strict().refine(
   (value) => value.label !== undefined || value.configDir !== undefined,
@@ -379,9 +395,32 @@ const selectAgentProfileSchema = z.object({
   profileId: z.string().max(64).nullable(),
 }).strict();
 
-/** The hosted-mode refusal, worded like the agent-config one it mirrors. */
+/** The hosted-mode refusal, worded like the agent-config one it mirrors. Still the answer on a
+ *  hosted cockpit without `CEZ_HOSTED_ACCOUNTS=1`. */
 const hostedProfileRefusal = {
   error: 'agent accounts are managed from the machine that owns the checkout (this cockpit runs in hosted mode)',
+};
+
+/** A hosted cockpit allocates every account's folder itself: a typed path there would be an
+ *  arbitrary-path write, and the folder's hooks an RCE primitive (spec 2026-10-04-hosted-agent-accounts). */
+const hostedConfigDirRefusal = { error: 'configDir is allocated by cezar in hosted mode' };
+
+/**
+ * Accounts a hosted cockpit adds, per agent (spec 2026-10-04-hosted-agent-accounts H2). Each one is a
+ * folder cezar creates and keeps for good (removing an account never deletes it) and a probe it may
+ * spawn, so an add with no ceiling hands whoever reaches the cockpit a disk and process budget. Local
+ * is not capped: its folders are the user's own.
+ */
+const HOSTED_ACCOUNTS_PER_PROVIDER = 16;
+const accountLimitRefusal = { error: 'account limit reached' };
+/** Thrown from the add's store mutator, so the count and the write are one step: simultaneous adds
+ *  cannot all see room for one more. */
+class AccountLimitReached extends Error {}
+
+/** A Default login's folder is the one cezar discovers (`CLAUDE_CONFIG_DIR`, `~/.claude`, …): only
+ *  its name can change, on any cockpit (spec 2026-10-04-hosted-agent-accounts). */
+const defaultFolderRefusal = {
+  error: 'the folder of a Default login is the one cezar discovers; only its name can change',
 };
 
 /**
@@ -1309,6 +1348,16 @@ export function createApp(deps: ServerDeps) {
   const trackers = createTrackerService();
   const trackerWatches = new TrackerWatches(trackers, deps.socketHub);
   const capabilities = () => resolveCapabilities(process.env, bindHost);
+  /**
+   * Hosted agent-account management (spec 2026-10-04-hosted-agent-accounts H2): opt-in on a cockpit
+   * that is not local, and documented as needing the authenticating proxy hosted installs already
+   * put in front. Server-internal — not a `Capabilities` field; the cockpit reads the listing's
+   * `manageable`. Read per request, and only the exact value `1` turns it on.
+   */
+  const hostedAccounts = () => !capabilities().localHandoff && process.env.CEZ_HOSTED_ACCOUNTS === '1';
+  /** May this cockpit change accounts? Locally always; elsewhere only with `CEZ_HOSTED_ACCOUNTS=1`.
+   *  Every management route asks BEFORE it resolves `:id`, so a refusal cannot probe which ids exist. */
+  const canManageAccounts = () => capabilities().localHandoff || hostedAccounts();
   const singleProjectRefusal = (
     action: 'adding projects' | 'editing projects' | 'removing projects' | 'folder browsing',
   ) => ({ error: `single-project mode is enabled; ${action} is disabled` });
@@ -1827,16 +1876,13 @@ export function createApp(deps: ServerDeps) {
     provider: ProviderId,
     profileId?: string,
   ): Promise<{ profile: ResolvedAgentProfile } | { error: string }> => {
+    // One read answers both: the Default login's NAME lives in the store too (`defaultLabels`). An
+    // unreadable home still resolves the Default login — under its built-in name — and no other.
+    const store = await loadAgentAccounts().catch(() => undefined);
     if (profileId === undefined || profileId === DEFAULT_AGENT_ACCOUNT_ID) {
-      return { profile: defaultAgentProfile(provider) };
+      return { profile: defaultAgentProfile(provider, process.env, store?.defaultLabels[provider]) };
     }
-    let accounts: readonly AgentAccount[];
-    try {
-      accounts = (await loadAgentAccounts()).accounts;
-    } catch {
-      return { error: `unknown ${provider} account: ${profileId}` };
-    }
-    const stored = accounts.find((a) => a.id === profileId && a.provider === provider);
+    const stored = store?.accounts.find((a) => a.id === profileId && a.provider === provider);
     if (!stored) return { error: `unknown ${provider} account: ${profileId}` };
     return { profile: resolveStoredProfile(stored) };
   };
@@ -2095,7 +2141,10 @@ export function createApp(deps: ServerDeps) {
     const [head, tail] = id.split(':');
     if (head === DEFAULT_AGENT_ACCOUNT_ID) {
       const provider = PROVIDER_IDS.find((p) => p === tail);
-      return provider ? defaultAgentProfile(provider) : null;
+      if (!provider) return null;
+      // Its name, if it has been given one; an unreadable store answers the built-in name.
+      const labels = await loadAgentAccounts().then((store) => store.defaultLabels, () => undefined);
+      return defaultAgentProfile(provider, process.env, labels?.[provider]);
     }
     try {
       const stored = (await loadAgentAccounts()).accounts.find((a) => a.id === id);
@@ -2117,6 +2166,18 @@ export function createApp(deps: ServerDeps) {
     return null;
   };
 
+  /**
+   * The body for a failed write to the accounts store. Local mode answers with the error itself, as
+   * it always has. Anywhere else it is logged and the body is FIXED text: an fs error's message
+   * carries absolute paths (spec 2026-10-04-hosted-agent-accounts § Error bodies).
+   */
+  const accountSaveFailure = (err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err);
+    if (capabilities().localHandoff) return { error: message };
+    console.error(`[cez] agent accounts: ${message}`);
+    return { error: 'could not save the account (see server log)' };
+  };
+
   /** Refuse a dir that is already some other account's (or the default's), compared through
    *  `realpath` — two spellings of one directory would be two accounts silently sharing one
    *  session store, and "which one am I logged into?" would stop having an answer. */
@@ -2126,6 +2187,7 @@ export function createApp(deps: ServerDeps) {
     path: string,
     exceptId?: string,
   ): Promise<string | null> => {
+    // The Default login's FOLDER only, so its name is not looked up.
     if (await sameProfileDir(path, defaultAgentProfile(provider).path)) {
       return 'that is already this agent\'s default folder';
     }
@@ -2185,7 +2247,7 @@ export function createApp(deps: ServerDeps) {
       // honest `z.boolean()` then reads as wider than the route. Same shape as
       // `listAgentConfig`, which carries the same flag for the same reason.
       const editable = capabilities().localHandoff;
-      const manageable = editable;
+      const manageable = canManageAccounts();
       let store = defaultAgentAccountStore();
       try {
         store = await loadAgentAccounts();
@@ -2210,13 +2272,23 @@ export function createApp(deps: ServerDeps) {
     })
 
     .post('/workspace/agent-profiles', jsonZodValidator(() => createAgentProfileSchema), async (c) => {
-      if (!capabilities().localHandoff) return c.json(hostedProfileRefusal, 409);
+      if (!canManageAccounts()) return c.json(hostedProfileRefusal, 409);
       const { provider, configDir, label } = c.req.valid('json');
       if (!supportsProfiles(provider)) {
         return c.json({ error: `${provider} cannot carry more than one account` }, 400);
       }
-      const dirError = checkProfileDir(configDir);
-      if (dirError) return c.json({ error: dirError }, 400);
+      // Local: the folder is the user's to name. Hosted (spec 2026-10-04-hosted-agent-accounts H2):
+      // never — cezar allocates a fresh `cezarHomeDir()/accounts/<provider>/<id>/`, so no request can
+      // point an agent, and its hooks, at a path of its choosing. The name is then required: it is
+      // where the id (and the folder's name) comes from.
+      if (!capabilities().localHandoff) {
+        if (configDir !== undefined) return c.json(hostedConfigDirRefusal, 400);
+        if (!label) return c.json({ error: 'label is required in hosted mode' }, 400);
+      } else {
+        if (configDir === undefined) return c.json({ error: 'configDir is required' }, 400);
+        const dirError = checkProfileDir(configDir);
+        if (dirError) return c.json({ error: dirError }, 400);
+      }
 
       // Read-first, exactly like `POST /projects`: the duplicate check needs `realpath`, and the
       // merge-write mutator is deliberately SYNCHRONOUS so the read→rename window stays as small
@@ -2229,26 +2301,52 @@ export function createApp(deps: ServerDeps) {
       } catch {
         // unreadable store — the merge-write below reports the real failure
       }
-      const conflict = await conflictingProfile(existing, provider, expandTilde(configDir));
-      if (conflict !== null) return c.json({ error: conflict }, 409);
+      if (configDir !== undefined) {
+        const conflict = await conflictingProfile(existing, provider, expandTilde(configDir));
+        if (conflict !== null) return c.json({ error: conflict }, 409);
+      }
 
       let created: AgentAccount | undefined;
+      let allocatedDir: string | undefined;
       try {
         await mergeWriteAgentAccounts((store) => {
-          const id = allocateAgentProfileId(label ?? configDir, store.accounts.map((a) => a.id));
+          if (
+            !capabilities().localHandoff &&
+            store.accounts.filter((a) => a.provider === provider).length >= HOSTED_ACCOUNTS_PER_PROVIDER
+          ) {
+            throw new AccountLimitReached();
+          }
+          const taken = store.accounts.map((a) => a.id);
+          let id: string;
+          let dir: string;
+          if (configDir === undefined) {
+            // Hosted: the id and a fresh folder together. A candidate whose folder already exists (a
+            // removed account's leftover) is skipped, so a new account never inherits an old login.
+            ({ id, dir } = allocateManagedAccountDir(provider, label ?? '', taken));
+            allocatedDir = dir;
+          } else {
+            id = allocateAgentProfileId(label ?? configDir, taken);
+            dir = configDir;
+          }
           created = {
             id,
             provider,
-            configDir,
+            configDir: dir,
             label: label?.trim() || id,
             addedAt: new Date().toISOString(),
           };
           store.accounts.push(created);
         });
       } catch (err) {
-        return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+        // A folder allocated for a write that then failed holds nothing and names no account;
+        // leaving it would only make the next add skip its id.
+        if (allocatedDir !== undefined) await rmdir(allocatedDir).catch(() => {});
+        if (err instanceof AccountLimitReached) return c.json(accountLimitRefusal, 409);
+        return c.json(accountSaveFailure(err), 500);
       }
       if (!created) return c.json({ error: 'account could not be saved' }, 500);
+      // The allocated path is said in ONE place — the server log, for whoever operates the host.
+      if (allocatedDir !== undefined) console.log(`[cez] added ${provider} account "${created.id}" in ${allocatedDir}`);
       // A brand-new account is the one thing the boot warm could not have known about, so learn it
       // now rather than only when something asks. Still off the response: the row is returned with
       // `status` absent (the listing's rule), the pane shows Checking…, and its follow-up request
@@ -2266,10 +2364,34 @@ export function createApp(deps: ServerDeps) {
       paramZodValidator(z.object({ id: z.string() })),
       jsonZodValidator(() => updateAgentProfileSchema),
       async (c) => {
-        if (!capabilities().localHandoff) return c.json(hostedProfileRefusal, 409);
+        if (!canManageAccounts()) return c.json(hostedProfileRefusal, 409);
         const id = c.req.param('id');
         const { label, configDir } = c.req.valid('json');
+        // A Default login (spec 2026-10-04-hosted-agent-accounts § Renaming the Default logins): its
+        // NAME is the one thing about it a user sets. The account is still never stored — only
+        // `defaultLabels[provider]` is written, so no id, selection or default moves — and its folder
+        // is the one cezar discovers, so a `configDir` is refused on every cockpit.
+        if (id.startsWith(`${DEFAULT_AGENT_ACCOUNT_ID}:`)) {
+          const discovered = await accountById(id);
+          if (!discovered) return c.json({ error: `unknown account: ${id}` }, 404);
+          if (configDir !== undefined) return c.json(defaultFolderRefusal, 400);
+          // Empty clears: absence IS `Default`, so the built-in name is never written down. (A body
+          // with neither key never gets here — the schema refuses it.)
+          const name = label?.trim() || undefined;
+          try {
+            await mergeWriteAgentAccounts((store) => {
+              if (name === undefined) delete store.defaultLabels[discovered.provider];
+              else store.defaultLabels[discovered.provider] = name;
+            });
+          } catch (err) {
+            return c.json(accountSaveFailure(err), 500);
+          }
+          return c.json({ profile: await agentProfileBody(defaultAgentProfile(discovered.provider, process.env, name)) });
+        }
         if (configDir !== undefined) {
+          // An existing account's folder never changes on a hosted cockpit — not even a hand-added
+          // one's (spec 2026-10-04-hosted-agent-accounts § Edge Cases).
+          if (!capabilities().localHandoff) return c.json(hostedConfigDirRefusal, 400);
           const dirError = checkProfileDir(configDir);
           if (dirError) return c.json({ error: dirError }, 400);
         }
@@ -2300,7 +2422,7 @@ export function createApp(deps: ServerDeps) {
             updated = entry;
           });
         } catch (err) {
-          return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+          return c.json(accountSaveFailure(err), 500);
         }
         if (!updated) return c.json({ error: `unknown account: ${id}` }, 404);
         // The dir may have moved under a cached probe — drop THIS account's answer so the response
@@ -2332,7 +2454,8 @@ export function createApp(deps: ServerDeps) {
       paramZodValidator(z.object({ id: z.string() })),
       queryZodValidator(z.object({ refresh: queryValue.refine((v) => v === undefined || v === '1') }), { message: 'refresh must be 1 when provided' }),
       async (c) => {
-        if (!capabilities().localHandoff) return c.json(hostedProfileRefusal, 409);
+        // Not offered read-only: a cold cache spawns the probe (`provider-auth.ts` `profileStatus`).
+        if (!canManageAccounts()) return c.json(hostedProfileRefusal, 409);
         const account = await accountById(c.req.param('id'));
         if (!account) return c.json({ error: `unknown account: ${c.req.param('id')}` }, 404);
         const refresh = c.req.valid('query').refresh === '1';
@@ -2368,7 +2491,9 @@ export function createApp(deps: ServerDeps) {
       '/workspace/agent-profiles/:id/details',
       paramZodValidator(z.object({ id: z.string() })),
       async (c) => {
-        if (!capabilities().localHandoff) return c.json(hostedProfileRefusal, 409);
+        // A hosted cockpit shows identity only with management on: the email/org then goes to a user
+        // the authenticating proxy already let in (spec 2026-10-04-hosted-agent-accounts H2).
+        if (!canManageAccounts()) return c.json(hostedProfileRefusal, 409);
         const account = await accountById(c.req.param('id'));
         if (!account) return c.json({ error: `unknown account: ${c.req.param('id')}` }, 404);
         return c.json(await readAccountIdentity(account.provider, account.path));
@@ -2439,7 +2564,7 @@ export function createApp(deps: ServerDeps) {
       '/workspace/agent-profiles/selection',
       jsonZodValidator(() => selectAgentProfileSchema),
       async (c) => {
-        if (!capabilities().localHandoff) return c.json(hostedProfileRefusal, 409);
+        if (!canManageAccounts()) return c.json(hostedProfileRefusal, 409);
         const { projectId, provider, profileId } = c.req.valid('json');
         // `null` writes the MACHINE-WIDE default instead of one repo's selection: the account any
         // repo that has chosen nothing uses, so a second login is set up once rather than per
@@ -2482,9 +2607,13 @@ export function createApp(deps: ServerDeps) {
             else current.selections[root] = selection;
           });
         } catch (err) {
-          return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+          return c.json(accountSaveFailure(err), 500);
         }
-        return c.json({ selections: store.selections, defaults: store.defaults });
+        // Through the same gate as the listing: the store also holds roots nothing registers and keys
+        // this version does not know, and a cockpit that is not local must never be handed them (see
+        // `hostedAccountChoices`). Local answers with the store as it is, as it always has.
+        const { selections, defaults } = capabilities().localHandoff ? store : await hostedAccountChoices(store);
+        return c.json({ selections, defaults });
       },
     )
 
@@ -2492,16 +2621,18 @@ export function createApp(deps: ServerDeps) {
       '/workspace/agent-profiles/:id',
       paramZodValidator(z.object({ id: z.string() })),
       async (c) => {
-        if (!capabilities().localHandoff) return c.json(hostedProfileRefusal, 409);
+        if (!canManageAccounts()) return c.json(hostedProfileRefusal, 409);
         const id = c.req.param('id');
         let removed = false;
         // Captured inside the mutator, because after the write there is nothing left to ask which
         // provider this account belonged to — and the eviction below is keyed by it.
         let removedProvider: ProviderId | undefined;
+        let removedDir: string | undefined;
         try {
           await mergeWriteAgentAccounts((store) => {
             const before = store.accounts.length;
             removedProvider = store.accounts.find((a) => a.id === id)?.provider;
+            removedDir = store.accounts.find((a) => a.id === id)?.configDir;
             store.accounts = store.accounts.filter((a) => a.id !== id);
             removed = store.accounts.length < before;
             if (!removed) return;
@@ -2515,11 +2646,22 @@ export function createApp(deps: ServerDeps) {
               }
               if (Object.keys(selection).length === 0) delete store.selections[root];
             }
+            // The machine-wide defaults are references too: left behind, the removed id would keep
+            // winning for every repo with no selection of its own, and a runner pill would point at
+            // a row that no longer exists (it falls back to the bare agent row, not to Default).
+            for (const key of Object.keys(store.defaults) as Array<keyof typeof store.defaults>) {
+              if (store.defaults[key] === id) delete store.defaults[key];
+            }
           });
         } catch (err) {
-          return c.json({ error: err instanceof Error ? err.message : String(err) }, 500);
+          return c.json(accountSaveFailure(err), 500);
         }
         if (!removed) return c.json({ error: `unknown account: ${id}` }, 404);
+        // Deregistration only: the folder stays (and is never handed to a new account). A hosted
+        // operator learns where it is from the log, the one place that path is said.
+        if (!capabilities().localHandoff && removedDir !== undefined) {
+          console.log(`[cez] removed ${removedProvider} account "${id}"; its folder stays on disk: ${expandTilde(removedDir)}`);
+        }
         // Only this account's answer: it is about to stop existing, and holding it would let a
         // re-added account with the same id read the deleted one's state.
         providerAuth.forgetProfileStatus(removedProvider, id);

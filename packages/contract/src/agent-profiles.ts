@@ -88,11 +88,13 @@ export const agentProfileSchema = z.object({
 export type AgentProfile = z.infer<typeof agentProfileSchema>;
 
 /**
- * How to address one account in the per-account routes (`…/:id/details`, `…/:id/open`).
+ * How to address one account in the per-account routes (`…/:id/status`, `…/:id/details`,
+ * `…/:id/open`, and `PATCH …/:id` — which renames a discovered account too, spec
+ * 2026-10-04-hosted-agent-accounts).
  *
  * Every DISCOVERED account shares `id: "default"` — that spelling is load-bearing in the selection
  * routes, where it means "back to the discovered account" — so it cannot identify which agent's
- * default is meant. These two routes therefore take `default:<provider>` for a discovered account
+ * default is meant. These routes therefore take `default:<provider>` for a discovered account
  * and the stored slug otherwise. Defined once, here, so the client and the server cannot disagree
  * about the encoding; still opaque, still not a path.
  */
@@ -225,12 +227,19 @@ export const openAgentAccountFileResponseSchema = z.object({
 });
 export type OpenAgentAccountFileResponse = z.infer<typeof openAgentAccountFileResponseSchema>;
 
-/** `POST /api/v1/workspace/agent-profiles` — the id is allocated server-side from the label. */
+/**
+ * `POST /api/v1/workspace/agent-profiles` — the id is allocated server-side from the label.
+ *
+ * Local: `configDir` is required (400 without it). Hosted with `CEZ_HOSTED_ACCOUNTS=1` (spec
+ * 2026-10-04-hosted-agent-accounts): `configDir` is REFUSED (400) and `label` is required — cezar
+ * allocates a fresh `~/.cezar/accounts/<provider>/<id>/` itself.
+ */
 export const createAgentProfileInputSchema = z.object({
   provider: providerIdSchema,
+  /** Trimmed, at most 200 characters, and no control characters (a 400 otherwise). */
   label: z.string().trim().max(200).optional(),
   /** Stored as written; validated absolute after `~` expansion, server-side. */
-  configDir: z.string().trim().min(1).max(4096),
+  configDir: z.string().trim().min(1).max(4096).optional(),
 });
 export type CreateAgentProfileInput = z.infer<typeof createAgentProfileInputSchema>;
 
@@ -244,8 +253,16 @@ export type CreateAgentProfileInput = z.infer<typeof createAgentProfileInputSche
 export const agentProfileResponseSchema = z.object({ profile: agentProfileSchema });
 export type AgentProfileResponse = z.infer<typeof agentProfileResponseSchema>;
 
-/** `PATCH /api/v1/workspace/agent-profiles/:id` — partial; absent keys stay untouched. */
+/**
+ * `PATCH /api/v1/workspace/agent-profiles/:id` — partial; absent keys stay untouched.
+ *
+ * A Default login (`:id` = `default:<provider>`, see `agentAccountRouteId`) takes `label` only — a
+ * `configDir` is a 400 on every cockpit, because its folder is the one cezar discovers — and an empty
+ * `label` clears its name back to `Default` (spec 2026-10-04-hosted-agent-accounts § Renaming the
+ * Default logins). Its id never changes, so nothing that chooses it does either.
+ */
 export const updateAgentProfileInputSchema = z.object({
+  /** Trimmed, at most 200 characters, and no control characters (a 400 otherwise). */
   label: z.string().trim().max(200).optional(),
   configDir: z.string().trim().min(1).max(4096).optional(),
 });

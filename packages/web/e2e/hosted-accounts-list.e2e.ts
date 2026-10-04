@@ -70,6 +70,42 @@ function leaks(text: string): string[] {
 const html = (): string => String(browser.evaluate('document.documentElement.outerHTML'))
 const pageText = (): string => String(browser.evaluate('document.body.innerText'))
 
+/**
+ * Let Node's event loop run once. This suite drives the browser through SYNCHRONOUS calls
+ * (`execFileSync`) and starts its server in a slow `beforeAll`, which block the loop for seconds: the
+ * server meanwhile closes the idle keep-alive socket Node's fetch pooled, and the next request goes
+ * out on that dead socket before the loop has noticed it close — `ECONNRESET` with no response, a
+ * dead connection and never a dead server. Yielding first lets the loop drop the closed socket, so
+ * the request opens a fresh one. (`connection: close` on the request does NOT avoid this — the pool
+ * still hands out the dead socket — and an immediate `setImmediate` is too short.)
+ */
+const settle = () => new Promise<void>((r) => setTimeout(r, 50))
+
+/**
+ * One request, answered with its status and raw text. It yields first (see `settle`), so no request
+ * has to be re-sent. A mutation is NEVER retried — it could be applied twice. A GET is retried once
+ * around `fetch()` itself, never around reading the body.
+ */
+async function send(method: string, path: string, body?: unknown): Promise<{ status: number; text: string }> {
+  await settle()
+  const init = {
+    method,
+    ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+  }
+  let response: Response
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      response = await fetch(`${baseUrl}${path}`, init)
+      break
+    } catch (error) {
+      const reset = (error as { cause?: { code?: string } }).cause?.code === 'ECONNRESET'
+      if (method !== 'GET' || !reset || attempt >= 1) throw error
+      await settle()
+    }
+  }
+  return { status: response.status, text: await response.text() }
+}
+
 beforeAll(async () => {
   dataRoot = mkdtempSync(join(tmpdir(), 'cezar-e2e-hosted-list-'))
   const git = (...args: string[]) => execFileSync('git', ['-C', dataRoot, ...args])
@@ -80,9 +116,9 @@ beforeAll(async () => {
   git('add', '.')
   git('commit', '-qm', 'init')
 
-  // `CEZ_REMOTE` is pinned explicitly: `fixtureServeEnv` copies this process's env, so whatever the
-  // operator exported must not decide which mode this suite tests.
-  const env = fixtureServeEnv(dataRoot, { CEZ_REMOTE: '1' })
+  // `CEZ_REMOTE` and `CEZ_HOSTED_ACCOUNTS` are pinned explicitly: `fixtureServeEnv` copies this
+  // process's env, so whatever the operator exported must not decide which mode this suite tests.
+  const env = fixtureServeEnv(dataRoot, { CEZ_REMOTE: '1', CEZ_HOSTED_ACCOUNTS: '0' })
   cezHome = env.CEZ_HOME as string
   mkdirSync(cezHome, { recursive: true })
   // Never created: the folder of a hand-added account the CLI has not written yet.
@@ -154,9 +190,9 @@ afterAll(async () => {
 
 describe('hosted agent accounts — the read-only list (H1)', () => {
   it('lists every account without its folder, its existence or a way to manage it', async () => {
-    const response = await fetch(`${baseUrl}/api/v1/workspace/agent-profiles`)
+    const response = await send('GET', '/api/v1/workspace/agent-profiles')
     expect(response.status).toBe(200)
-    const raw = await response.text()
+    const raw = response.text
     const body = JSON.parse(raw) as {
       editable: boolean
       manageable: boolean
@@ -186,7 +222,7 @@ describe('hosted agent accounts — the read-only list (H1)', () => {
 
   it('still refuses the per-account status probe — it can spawn a CLI, so it is not read-only', async () => {
     for (const id of ['work', 'default:claude']) {
-      const response = await fetch(`${baseUrl}/api/v1/workspace/agent-profiles/${encodeURIComponent(id)}/status`)
+      const response = await send('GET', `/api/v1/workspace/agent-profiles/${encodeURIComponent(id)}/status`)
       expect(response.status, id).toBe(409)
     }
   })
@@ -214,6 +250,29 @@ describe('hosted agent accounts — the read-only list (H1)', () => {
     } finally {
       browser.setViewport(1440, 900)
     }
+  })
+
+  it('a Default login keeps its name without the flag: no Rename, and PATCH is refused before it resolves', async () => {
+    // Still on Settings → Agent accounts (the case above).
+    expect(browser.count('[data-action="account-rename"]')).toBe(0)
+    const accountsFile = join(cezHome, 'agent-accounts.json')
+    const before = readFileSync(accountsFile, 'utf8')
+    // A PATCH is never retried — `send` yields first instead (see `settle`).
+    const patch = async (id: string, payload: unknown) => {
+      const response = await send('PATCH', `/api/v1/workspace/agent-profiles/${encodeURIComponent(id)}`, payload)
+      return { status: response.status, body: JSON.parse(response.text) as unknown }
+    }
+    const refused = await patch('default:claude', { label: 'Personal Max' })
+    expect(refused.status).toBe(409)
+    // The same answer for an id that names nothing, and for a body the route would refuse anyway:
+    // the gate answers first, so a refusal says nothing about which ids exist.
+    expect(await patch('default:nope', { label: 'Personal Max' })).toEqual(refused)
+    expect(await patch('default:claude', { configDir: join(dataRoot, 'x') })).toEqual(refused)
+    expect(readFileSync(accountsFile, 'utf8')).toBe(before)
+    const listed = await getJson<{ profiles: Array<{ provider: string; isDefault: boolean; label: string }> }>(
+      `${baseUrl}/api/v1/workspace/agent-profiles`,
+    )
+    expect(listed.profiles.find((p) => p.provider === 'claude' && p.isDefault)?.label).toBe('Default')
   })
 
   // The two defaults pickers: `scope` is the machine-wide block on Settings → Agent accounts, or ''

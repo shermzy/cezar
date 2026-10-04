@@ -28,7 +28,8 @@ export interface ResolvedAgentProfile {
   configDir: string;
   /** Expanded absolute path — what actually gets handed to the CLI. */
   path: string;
-  /** True for the discovered account, which is never stored and cannot be edited or deleted. */
+  /** True for the discovered account, which is never stored and cannot be repointed or deleted —
+   *  only its NAME can be set (`defaultLabels`, spec 2026-10-04-hosted-agent-accounts). */
   isDefault: boolean;
 }
 
@@ -64,13 +65,20 @@ const PROVIDER_HOME: Record<ProviderId, (home: ReturnType<typeof agentHomePaths>
 export function defaultAgentProfile(
   provider: ProviderId,
   env: NodeJS.ProcessEnv = process.env,
+  /**
+   * The name the user gave this login — the store's `defaultLabels[provider]` (spec
+   * 2026-10-04-hosted-agent-accounts § Renaming the Default logins). Absent = `Default`. Every
+   * caller holding the store passes it, so the listing, the pickers and the resolvers name the login
+   * alike; only a caller after the folder alone leaves it out.
+   */
+  label?: string,
 ): ResolvedAgentProfile {
   const home = agentHomePaths(env);
   const path = PROVIDER_HOME[provider](home);
   return {
     id: DEFAULT_AGENT_ACCOUNT_ID,
     provider,
-    label: 'Default',
+    label: label ?? 'Default',
     configDir: path,
     path,
     isDefault: true,
@@ -91,19 +99,19 @@ export function resolveStoredProfile(account: AgentAccount): ResolvedAgentProfil
 
 /** Every account for `provider`, discovered default first, then the stored extras in file order. */
 export function profilesForProvider(
-  store: Pick<AgentAccountStore, 'accounts'>,
+  store: Pick<AgentAccountStore, 'accounts' | 'defaultLabels'>,
   provider: ProviderId,
   env: NodeJS.ProcessEnv = process.env,
 ): ResolvedAgentProfile[] {
   return [
-    defaultAgentProfile(provider, env),
+    defaultAgentProfile(provider, env, store.defaultLabels[provider]),
     ...store.accounts.filter((a) => a.provider === provider).map(resolveStoredProfile),
   ];
 }
 
 /** Every account across every provider — the listing route's source. */
 export function listAgentProfiles(
-  store: Pick<AgentAccountStore, 'accounts'>,
+  store: Pick<AgentAccountStore, 'accounts' | 'defaultLabels'>,
   providers: readonly ProviderId[],
   env: NodeJS.ProcessEnv = process.env,
 ): ResolvedAgentProfile[] {
@@ -130,9 +138,10 @@ export function selectProfile(
   const { provider, repoRoot, profileId } = options;
   const env = options.env ?? process.env;
   const chosen = profileId ?? selectionFor(store, repoRoot, provider);
-  if (chosen === undefined || chosen === DEFAULT_AGENT_ACCOUNT_ID) return defaultAgentProfile(provider, env);
+  const discovered = () => defaultAgentProfile(provider, env, store.defaultLabels[provider]);
+  if (chosen === undefined || chosen === DEFAULT_AGENT_ACCOUNT_ID) return discovered();
   const stored = store.accounts.find((a) => a.id === chosen && a.provider === provider);
-  return stored ? resolveStoredProfile(stored) : defaultAgentProfile(provider, env);
+  return stored ? resolveStoredProfile(stored) : discovered();
 }
 
 /**
@@ -153,6 +162,7 @@ export async function resolveProfileEnvForRoot(
   try {
     store = await loadAgentAccounts();
   } catch {
+    // No store, so no name either: the Default login under its built-in one.
     return { profile: defaultAgentProfile(provider, env), env: {} };
   }
   const profile = selectProfile(store, { provider, repoRoot, profileId, env });

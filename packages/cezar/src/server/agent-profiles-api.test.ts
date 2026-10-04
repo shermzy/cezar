@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -45,6 +45,7 @@ describe('agent profiles API', () => {
     remote: process.env.CEZ_REMOTE,
     dryRun: process.env.CEZ_DRY_RUN,
     singleProject: process.env.CEZ_SINGLE_PROJECT,
+    hostedAccounts: process.env.CEZ_HOSTED_ACCOUNTS,
   };
   let home: string;
   let repoRoot: string;
@@ -55,6 +56,10 @@ describe('agent profiles API', () => {
     repoRoot = mkdtempSync(join(realpathSync(tmpdir()), 'cez-profiles-repo-'));
     process.env.CEZ_HOME = home;
     delete process.env.CEZ_REMOTE;
+    // Every hosted case here is "management OFF" (spec 2026-10-04-hosted-agent-accounts § Testing)
+    // unless it turns the flag on itself, as the Default-login renames do; the rest of the opted-in
+    // behaviour is exercised end to end by `hosted-accounts-manage.e2e.ts`.
+    delete process.env.CEZ_HOSTED_ACCOUNTS;
     delete process.env.CEZ_SINGLE_PROJECT;
     // Deterministic on any machine: no real agent CLIs are probed.
     process.env.CEZ_DRY_RUN = '1';
@@ -70,6 +75,7 @@ describe('agent profiles API', () => {
       ['CEZ_REMOTE', saved.remote],
       ['CEZ_DRY_RUN', saved.dryRun],
       ['CEZ_SINGLE_PROJECT', saved.singleProject],
+      ['CEZ_HOSTED_ACCOUNTS', saved.hostedAccounts],
     ] as const) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -312,6 +318,166 @@ describe('agent profiles API', () => {
     it('400s an empty body', async () => {
       const profile = await create('Work', claudeDir('claude-klaudiusz'));
       expect((await send('PATCH', `/api/v1/workspace/agent-profiles/${profile.id}`, {})).status).toBe(400);
+    });
+  });
+
+  /**
+   * The Default logins' NAMES (spec 2026-10-04-hosted-agent-accounts § Renaming the Default logins).
+   * The discovered account is still never stored: a rename writes `defaultLabels[provider]` and
+   * nothing else, so every id — and every selection and default naming one — stays as it was.
+   */
+  describe('renaming a Default login (PATCH default:<provider>)', () => {
+    const FOLDER_REFUSAL = 'the folder of a Default login is the one cezar discovers; only its name can change';
+    const onDisk = () =>
+      JSON.parse(readFileSync(agentAccountsPath(), 'utf8')) as {
+        accounts: unknown;
+        selections: unknown;
+        defaults: unknown;
+        defaultLabels?: Record<string, unknown>;
+      };
+    const defaultLabel = async (provider: string) =>
+      (await list()).profiles.find((p) => p.provider === provider && p.isDefault)?.label;
+    const rename = (provider: string, body: unknown) =>
+      send('PATCH', `/api/v1/workspace/agent-profiles/default:${provider}`, body);
+
+    it('renames the Claude Default login, and moves nothing else', async () => {
+      // A stored account and a machine default naming it: what a rename must leave exactly as it is.
+      const { body: created } = await send('POST', '/api/v1/workspace/agent-profiles', {
+        provider: 'claude',
+        label: 'Work',
+        configDir: claudeDir('claude-work'),
+      });
+      await send('PUT', '/api/v1/workspace/agent-profiles/selection', {
+        projectId: null,
+        provider: 'claude',
+        profileId: created.profile.id,
+      });
+      const { accounts, selections, defaults } = onDisk();
+
+      const { status, body } = await rename('claude', { label: '  Personal Max  ' });
+      expect(status).toBe(200);
+      expect(body.profile).toMatchObject({ id: 'default', provider: 'claude', label: 'Personal Max', isDefault: true });
+      expect(await defaultLabel('claude')).toBe('Personal Max');
+      expect(await defaultLabel('codex')).toBe('Default');
+      const after = onDisk();
+      expect({ accounts: after.accounts, selections: after.selections, defaults: after.defaults })
+        .toEqual({ accounts, selections, defaults });
+      expect(after.defaultLabels).toEqual({ claude: 'Personal Max' });
+    });
+
+    it('clears back to Default on an empty name, storing absence rather than the built-in name', async () => {
+      expect((await rename('claude', { label: 'Personal Max' })).status).toBe(200);
+      const { status, body } = await rename('claude', { label: '   ' });
+      expect(status).toBe(200);
+      expect(body.profile.label).toBe('Default');
+      expect(await defaultLabel('claude')).toBe('Default');
+      expect(onDisk().defaultLabels ?? {}).not.toHaveProperty('claude');
+    });
+
+    it('refuses a folder in either shape, and a provider that does not exist, writing nothing', async () => {
+      expect((await rename('claude', { label: 'Personal Max' })).status).toBe(200);
+      const before = readFileSync(agentAccountsPath(), 'utf8');
+      for (const payload of [{ configDir: claudeDir('elsewhere') }, { label: 'X', configDir: claudeDir('elsewhere') }]) {
+        const { status, body } = await rename('claude', payload);
+        expect(status, JSON.stringify(payload)).toBe(400);
+        expect(body.error).toBe(FOLDER_REFUSAL);
+      }
+      expect((await rename('nope', { label: 'X' })).status).toBe(404);
+      expect(readFileSync(agentAccountsPath(), 'utf8')).toBe(before);
+      expect(await defaultLabel('claude')).toBe('Personal Max');
+    });
+
+    it('still refuses DELETE default:claude, and the name survives it', async () => {
+      expect((await rename('claude', { label: 'Personal Max' })).status).toBe(200);
+      expect((await send('DELETE', '/api/v1/workspace/agent-profiles/default:claude')).status).toBe(404);
+      expect(await defaultLabel('claude')).toBe('Personal Max');
+    });
+
+    it('falls back to Default for one bad hand-edited name alone, and keeps keys it does not know', async () => {
+      writeFileSync(
+        agentAccountsPath(),
+        JSON.stringify({
+          version: 1,
+          accounts: [],
+          defaultLabels: { claude: 'Personal Max', codex: 42, opencode: 'x'.repeat(201), gemini: 'Kept' },
+        }),
+        'utf8',
+      );
+      expect(await defaultLabel('claude')).toBe('Personal Max');
+      expect(await defaultLabel('codex')).toBe('Default');
+      expect(await defaultLabel('opencode')).toBe('Default');
+
+      expect((await rename('codex', { label: 'Codex Max' })).status).toBe(200);
+      expect(onDisk().defaultLabels).toEqual({ claude: 'Personal Max', codex: 'Codex Max', gemini: 'Kept' });
+    });
+
+    it('renames the same way on a hosted cockpit with management on, and answers without a folder', async () => {
+      process.env.CEZ_REMOTE = '1';
+      process.env.CEZ_HOSTED_ACCOUNTS = '1';
+      const { status, body } = await rename('claude', { label: 'Personal Max' });
+      expect(status).toBe(200);
+      expect(body.profile).toMatchObject({ id: 'default', provider: 'claude', label: 'Personal Max', isDefault: true });
+      expect(body.profile).not.toHaveProperty('configDir');
+      expect(await defaultLabel('claude')).toBe('Personal Max');
+
+      const folder = await rename('claude', { configDir: '/tmp/x' });
+      expect(folder.status).toBe(400);
+      expect(folder.body.error).toBe(FOLDER_REFUSAL);
+      expect((await rename('claude', { label: '' })).body.profile.label).toBe('Default');
+    });
+  });
+
+  /**
+   * An account's name reaches the page, the composer's pill and a hosted folder's slug, so it is a
+   * line of printable text: trimmed, at most 200 characters, NO control characters (spec
+   * 2026-10-04-hosted-agent-accounts § Renaming the Default logins). Refused on the raw value, so a
+   * trailing newline is refused rather than trimmed into acceptance.
+   */
+  describe('labels refuse control characters', () => {
+    const BAD = ['Work\nTwo', 'Wo\u0000rk', 'Work\u007f', 'Work\t', 'Work\u001b[31m'];
+    const accountsOnDisk = async () => (await loadAgentAccounts()).accounts;
+
+    it("refuses one in a new account's name, local or hosted, writing and allocating nothing", async () => {
+      for (const label of BAD) {
+        const local = await send('POST', '/api/v1/workspace/agent-profiles', {
+          provider: 'claude',
+          label,
+          configDir: claudeDir('claude-bad-label'),
+        });
+        expect(local.status, JSON.stringify(label)).toBe(400);
+      }
+      process.env.CEZ_REMOTE = '1';
+      process.env.CEZ_HOSTED_ACCOUNTS = '1';
+      for (const label of BAD) {
+        const hosted = await send('POST', '/api/v1/workspace/agent-profiles', { provider: 'claude', label });
+        expect(hosted.status, JSON.stringify(label)).toBe(400);
+      }
+      expect(await accountsOnDisk()).toEqual([]);
+      expect(existsSync(join(home, 'accounts'))).toBe(false);
+    });
+
+    it("refuses one on a rename — an added account's and a Default login's — and changes neither", async () => {
+      const { body: created } = await send('POST', '/api/v1/workspace/agent-profiles', {
+        provider: 'claude',
+        label: 'Work',
+        configDir: claudeDir('claude-work'),
+      });
+      const before = readFileSync(agentAccountsPath(), 'utf8');
+      for (const label of BAD) {
+        expect((await send('PATCH', `/api/v1/workspace/agent-profiles/${created.profile.id}`, { label })).status).toBe(400);
+        expect((await send('PATCH', '/api/v1/workspace/agent-profiles/default:claude', { label })).status).toBe(400);
+      }
+      expect(readFileSync(agentAccountsPath(), 'utf8')).toBe(before);
+    });
+
+    it('lets a hand-edited Default login name with one degrade to Default, alone', async () => {
+      writeFileSync(
+        agentAccountsPath(),
+        JSON.stringify({ version: 1, accounts: [], defaultLabels: { claude: 'Per\u0007sonal', codex: 'Codex Max' } }),
+        'utf8',
+      );
+      const labels = (await list()).profiles.filter((p) => p.isDefault).map((p) => [p.provider, p.label]);
+      expect(labels).toEqual(expect.arrayContaining([['claude', 'Default'], ['codex', 'Codex Max']]));
     });
   });
 
@@ -901,6 +1067,162 @@ describe('agent profiles API', () => {
         expect(body.error).toContain('hosted mode');
       }
       expect((await loadAgentAccounts()).accounts).toEqual([]);
+    });
+  });
+
+  /**
+   * What a MUTATION answers with, on a cockpit that is not local but manages its accounts (spec
+   * 2026-10-04-hosted-agent-accounts H2). The listing withholds unregistered roots and unknown keys
+   * (`hostedAccountChoices`); a write that echoed the raw store would hand them to the same client.
+   */
+  describe('hosted management (CEZ_HOSTED_ACCOUNTS=1) — what a mutation answers with', () => {
+    const KEPT = '/srv/hosted-listing/registered';
+    const GONE = '/srv/hosted-listing/unregistered';
+    const raw = async (method: string, path: string, body?: unknown) => {
+      const res = await apiRequest(makeApp(), path, {
+        method,
+        ...(body === undefined
+          ? {}
+          : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+      });
+      return { status: res.status, text: await res.text() };
+    };
+    /** Every spelling of the hosting folder a response must not carry. */
+    const spellings = () => [home, JSON.stringify(home).slice(1, -1), home.replaceAll('\\', '/')];
+
+    beforeEach(() => {
+      process.env.CEZ_REMOTE = '1';
+      process.env.CEZ_HOSTED_ACCOUNTS = '1';
+    });
+
+    it('answers PUT selection with the filtered choices — no unregistered root, no key the schema does not know', async () => {
+      // The registry is seeded as a file in POSIX form, as the listing's hardening case does, so a
+      // registered root can be selected on every platform (`registerProject` cannot register a
+      // Windows root).
+      await mergeWriteWorkspaceConfig((config) => {
+        config.projects = [
+          { id: 'registered', root: KEPT, name: 'registered', addedAt: '', lastOpenedAt: '', source: 'local' },
+        ];
+      });
+      expect((await raw('POST', '/api/v1/workspace/agent-profiles', { provider: 'claude', label: 'Work' })).status).toBe(201);
+      // What the store keeps and a hosted client must never see: a root nothing registers (nothing
+      // removes a selection when its project is unregistered) and keys this version does not know.
+      await mergeWriteAgentAccounts((store) => {
+        store.selections[GONE] = { claude: 'work', futureProvider: 'x' };
+        store.defaults = { codex: 'work', futureProvider: 'x' };
+      });
+
+      const put = await raw('PUT', '/api/v1/workspace/agent-profiles/selection', {
+        projectId: 'registered',
+        provider: 'claude',
+        profileId: 'work',
+      });
+      expect(put.status).toBe(200);
+      expect(JSON.parse(put.text)).toEqual({ selections: { [KEPT]: { claude: 'work' } }, defaults: { codex: 'work' } });
+      expect(put.text).not.toContain(GONE);
+      expect(put.text).not.toContain('futureProvider');
+
+      // Served filtered, never rewritten: the file keeps what it was given.
+      const onDisk = await loadAgentAccounts();
+      expect(onDisk.selections[GONE]).toMatchObject({ claude: 'work', futureProvider: 'x' });
+      expect(onDisk.selections[KEPT]).toEqual({ claude: 'work' });
+    });
+
+    it('keeps answering a LOCAL write with the store as it is', async () => {
+      delete process.env.CEZ_REMOTE;
+      delete process.env.CEZ_HOSTED_ACCOUNTS;
+      await mergeWriteAgentAccounts((store) => {
+        store.selections[GONE] = { claude: 'work' };
+      });
+      const put = await raw('PUT', '/api/v1/workspace/agent-profiles/selection', {
+        projectId: null,
+        provider: 'codex',
+        profileId: null,
+      });
+      expect(put.status).toBe(200);
+      expect(JSON.parse(put.text).selections).toEqual({ [GONE]: { claude: 'work' } });
+    });
+
+    it('keeps every one of several simultaneous adds, each in its own folder', async () => {
+      // Two requests that both read the store before either wrote would leave one account — the other
+      // answered 201 and gone, its folder allocated and orphaned.
+      const adds = await Promise.all(
+        [1, 2, 3, 4].map(() => raw('POST', '/api/v1/workspace/agent-profiles', { provider: 'claude', label: 'Work' })),
+      );
+      expect(adds.map((a) => a.status)).toEqual([201, 201, 201, 201]);
+      const ids = adds.map((a) => (JSON.parse(a.text) as { profile: { id: string } }).profile.id).sort();
+      expect(ids).toEqual(['work', 'work-2', 'work-3', 'work-4']);
+      expect((await loadAgentAccounts()).accounts.map((a) => a.id).sort()).toEqual(ids);
+      for (const id of ids) expect(existsSync(join(home, 'accounts', 'claude', id))).toBe(true);
+    });
+
+    /** `n` stored Claude accounts, written straight to the store: the cap is about what is registered. */
+    const seedClaudeAccounts = (n: number) =>
+      mergeWriteAgentAccounts((store) => {
+        for (let i = 1; i <= n; i += 1) {
+          store.accounts.push({
+            id: `seed-${i}`,
+            provider: 'claude',
+            configDir: join(home, 'seed', `seed-${i}`),
+            label: `Seed ${i}`,
+            addedAt: '',
+          });
+        }
+      });
+
+    it('caps a hosted cockpit at 16 accounts per agent: the 17th is a fixed 409 that allocates nothing', async () => {
+      await seedClaudeAccounts(15);
+      const sixteenth = await raw('POST', '/api/v1/workspace/agent-profiles', { provider: 'claude', label: 'Sixteen' });
+      expect(sixteenth.status).toBe(201);
+
+      const seventeenth = await raw('POST', '/api/v1/workspace/agent-profiles', { provider: 'claude', label: 'Seventeen' });
+      expect(seventeenth.status).toBe(409);
+      expect(JSON.parse(seventeenth.text)).toEqual({ error: 'account limit reached' });
+      expect(existsSync(join(home, 'accounts', 'claude', 'seventeen'))).toBe(false);
+      expect((await loadAgentAccounts()).accounts.filter((a) => a.provider === 'claude')).toHaveLength(16);
+
+      // Per agent: Codex has its own sixteen.
+      expect((await raw('POST', '/api/v1/workspace/agent-profiles', { provider: 'codex', label: 'Other' })).status).toBe(201);
+    });
+
+    it('holds the cap under simultaneous adds: of four at 14 accounts, exactly two get in', async () => {
+      await seedClaudeAccounts(14);
+      const adds = await Promise.all(
+        [1, 2, 3, 4].map((n) => raw('POST', '/api/v1/workspace/agent-profiles', { provider: 'claude', label: `Racer ${n}` })),
+      );
+      expect(adds.map((a) => a.status).sort()).toEqual([201, 201, 409, 409]);
+      expect((await loadAgentAccounts()).accounts.filter((a) => a.provider === 'claude')).toHaveLength(16);
+    });
+
+    it('does not cap a local cockpit, whose folders the user names', async () => {
+      delete process.env.CEZ_REMOTE;
+      delete process.env.CEZ_HOSTED_ACCOUNTS;
+      await seedClaudeAccounts(16);
+      const added = await raw('POST', '/api/v1/workspace/agent-profiles', {
+        provider: 'claude',
+        label: 'Seventeen',
+        configDir: claudeDir('claude-seventeen'),
+      });
+      expect(added.status).toBe(201);
+    });
+
+    it('answers no other mutation with a folder', async () => {
+      const added = await raw('POST', '/api/v1/workspace/agent-profiles', { provider: 'claude', label: 'Work' });
+      const renamed = await raw('PATCH', '/api/v1/workspace/agent-profiles/work', { label: 'Work Two' });
+      const defaultRenamed = await raw('PATCH', '/api/v1/workspace/agent-profiles/default:claude', { label: 'Personal' });
+      const assigned = await raw('PUT', '/api/v1/workspace/agent-profiles/selection', {
+        projectId: null,
+        provider: 'claude',
+        profileId: 'work',
+      });
+      const removed = await raw('DELETE', '/api/v1/workspace/agent-profiles/work');
+      expect([added.status, renamed.status, defaultRenamed.status, assigned.status, removed.status]).toEqual([
+        201, 200, 200, 200, 200,
+      ]);
+      for (const { text } of [added, renamed, defaultRenamed, assigned, removed]) {
+        for (const spelling of spellings()) expect(text).not.toContain(spelling);
+        expect(text).not.toContain('configDir');
+      }
     });
   });
 

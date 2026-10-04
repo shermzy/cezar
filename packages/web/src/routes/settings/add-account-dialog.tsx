@@ -41,6 +41,7 @@ export function AddAccountDialog({
   onOpenChange,
   providers,
   initialProvider,
+  hosted = false,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -48,6 +49,9 @@ export function AddAccountDialog({
   providers: ProviderId[]
   /** Which agent's "Add account" was clicked; still switchable in the dialog. */
   initialProvider?: ProviderId
+  /** A cockpit that is not local (spec 2026-10-04-hosted-agent-accounts H2): cezar allocates the
+   *  folder on the host, so the dialog asks for a name and nothing else — the server refuses a path. */
+  hosted?: boolean
 }) {
   // `null` = the configured browse root. The dialog never spells that path itself.
   const [path, setPath] = useState<string | null>(null)
@@ -59,6 +63,10 @@ export function AddAccountDialog({
   const create = useCreateAgentProfile()
 
   const trimmed = configDir.trim()
+  const name = label.trim()
+  // Hosted: the name is the only input, and required — it is where the account's id comes from.
+  // Local: the folder is.
+  const ready = hosted ? name !== '' : trimmed !== ''
 
   const enter = (dir: string) => {
     setPath(dir)
@@ -74,9 +82,11 @@ export function AddAccountDialog({
   }
 
   const add = () => {
-    if (trimmed === '' || create.isPending) return
+    if (!ready || create.isPending) return
     create.mutate(
-      { provider, configDir: trimmed, ...(label.trim() ? { label: label.trim() } : {}) },
+      hosted
+        ? { provider, label: name }
+        : { provider, configDir: trimmed, ...(name ? { label: name } : {}) },
       {
         onSuccess: () => {
           onOpenChange(false)
@@ -84,7 +94,11 @@ export function AddAccountDialog({
           setConfigDir('')
           setSelected(null)
           setBrowsing(false)
-          toast('Account added — use Connect to sign in')
+          toast(
+            hosted
+              ? 'Account added. Sign it in on the machine that hosts cezar.'
+              : 'Account added — use Connect to sign in',
+          )
         },
       },
     )
@@ -96,8 +110,9 @@ export function AddAccountDialog({
         <DialogHeader>
           <DialogTitle>Add agent account</DialogTitle>
           <DialogDescription>
-            The config folder this account uses. It does not have to exist yet — Connect signs in
-            and the CLI creates it.
+            {hosted
+              ? 'cezar makes a fresh folder for this account on the machine that hosts it, so it never shares a login with another account.'
+              : 'The config folder this account uses. It does not have to exist yet — Connect signs in and the CLI creates it.'}
           </DialogDescription>
         </DialogHeader>
 
@@ -132,6 +147,8 @@ export function AddAccountDialog({
           </label>
         </div>
 
+        {hosted ? null : (
+        <>
         <div className="flex flex-col gap-1.5">
           <label className="flex min-w-0 items-center gap-2 text-[13px]">
             <span className="shrink-0 text-muted-foreground">Folder</span>
@@ -179,6 +196,8 @@ export function AddAccountDialog({
             emptyHint="No subfolders here — pick this folder by typing its path above."
           />
         ) : null}
+        </>
+        )}
 
         {/* The server's own words: "that is already this agent's default folder", "already used
             by …", "must be an absolute path". This dialog cannot know which applies. */}
@@ -194,7 +213,7 @@ export function AddAccountDialog({
           </Button>
           <Button
             data-slot="add-account-confirm"
-            disabled={trimmed === '' || create.isPending}
+            disabled={!ready || create.isPending}
             onClick={add}
           >
             {create.isPending ? 'Adding…' : 'Add account'}

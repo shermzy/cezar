@@ -260,6 +260,33 @@ describe('agent accounts store', () => {
       // Last-writer-wins only inside the read→rename window; neither write is lost outright.
       expect(store.accounts.length + Object.keys(store.selections).length).toBeGreaterThanOrEqual(2);
     });
+
+    it('serializes the writers of one process: every concurrent add survives', async () => {
+      // Each write re-reads the file and renames over it, so two requests that both read before either
+      // wrote would leave only the later one — an add answered 201 and then gone. Eight at once make
+      // that loss certain rather than likely.
+      const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+      await Promise.all(
+        ids.map((id) =>
+          mergeWriteAgentAccounts((store) => {
+            store.accounts.push(account(id));
+          }),
+        ),
+      );
+      expect((await loadAgentAccounts()).accounts.map((a) => a.id).sort()).toEqual(ids);
+    });
+
+    it('lets a writer that throws fail alone — the ones queued behind it still run', async () => {
+      const failing = mergeWriteAgentAccounts(() => {
+        throw new Error('mutator failed');
+      });
+      const after = mergeWriteAgentAccounts((store) => {
+        store.accounts.push(account('work'));
+      });
+      await expect(failing).rejects.toThrow('mutator failed');
+      await after;
+      expect((await loadAgentAccounts()).accounts.map((a) => a.id)).toEqual(['work']);
+    });
   });
 
   describe('selectionFor', () => {

@@ -218,7 +218,9 @@ const openDetails = async (id: string) => {
 }
 
 describe('the agent accounts section', () => {
-  it('lists the discovered account with no edit controls at all', async () => {
+  // Updated deliberately (spec 2026-10-04-hosted-agent-accounts § Renaming the Default logins, owner
+  // request): this case pinned "no edit controls at all"; the discovered account now has a Rename.
+  it('lists the discovered account with a Rename and never a Remove', async () => {
     serve({ editable: true, manageable: true, profileCapableProviders: ['claude', 'codex'],
       defaults: {},
       selections: {}, profiles: DEFAULTS })
@@ -227,11 +229,12 @@ describe('the agent accounts section', () => {
     // One tab at a time, so only the ACTIVE agent's rows are in the DOM.
     await waitFor(() => expect(rows()).toHaveLength(1))
     expect(document.body.textContent).toContain('discovered')
-    // The discovered profile is what cezar found — a Rename or Remove would imply a setting. Checked
-    // with the panel OPEN, since that is now the only place either could appear.
+    // The discovered profile is what cezar found — a Remove would imply a setting that does not exist.
+    // Its NAME is cezar's own, so it can be renamed. Checked with the panel OPEN, since that is the
+    // only place either could appear.
     await openDetails('default')
-    expect(document.querySelector('[data-slot="account-manage"]')).toBeNull()
-    expect(document.querySelector('[data-action="account-rename"]')).toBeNull()
+    expect(document.querySelector('[data-slot="account-manage"]')).not.toBeNull()
+    expect(document.querySelector('[data-action="account-rename"]')).not.toBeNull()
     expect(document.querySelector('[data-action="account-remove"]')).toBeNull()
   })
 

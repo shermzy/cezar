@@ -1,12 +1,18 @@
-import { realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { posix, resolve, win32 } from 'node:path';
+import { join, posix, resolve, win32 } from 'node:path';
 import { z } from 'zod';
 import { DEFAULT_AGENT_ACCOUNT_ID } from '@open-mercato/cezar-contract';
 import { PROVIDER_IDS, type ProviderId } from '../core/provider-auth.ts';
 import { supportsProfiles } from '../core/agent-profiles.ts';
-import { agentAccountsPath, workspaceConfigPath } from '../paths.ts';
+import {
+  agentAccountsPath,
+  assertCezarHomeWriteIsSandboxed,
+  managedAccountsDir,
+  workspaceConfigPath,
+} from '../paths.ts';
 import { atomicWriteJsonSync } from './config.ts';
+import { allocateProjectSlug } from './projects.ts';
 
 /**
  * `~/.cezar/agent-accounts.json` — the agent-accounts store (spec `2026-07-29-agent-profiles.md`).
@@ -133,6 +139,35 @@ const selectionSchema = z
 
 export type AgentAccountSelection = z.infer<typeof selectionSchema>;
 
+/**
+ * A Default login's name (spec 2026-10-04-hosted-agent-accounts § Renaming the Default logins): the
+ * label rules the routes enforce — trimmed, at most 200 characters, no control characters — and never
+ * empty, because an empty name is no name, which is `Default`. Per key, so one hand-edited value
+ * (a control character included) falls back to `Default` alone instead of failing the file.
+ */
+const defaultLabelSchema = z
+  .string()
+  .refine((v) => !CONTROL_CHARS_RE.test(v))
+  .trim()
+  .min(1)
+  .max(200)
+  .optional()
+  .catch(undefined);
+
+/** Provider → the name its discovered login goes by. Explicit keys for the reason `selectionSchema`
+ *  gives; `.passthrough()` keeps a provider this version has not heard of. */
+const defaultLabelsSchema = z
+  .object({
+    claude: defaultLabelSchema,
+    codex: defaultLabelSchema,
+    opencode: defaultLabelSchema,
+    cursor: defaultLabelSchema,
+    pi: defaultLabelSchema,
+    junie: defaultLabelSchema,
+    copilot: defaultLabelSchema,
+  })
+  .passthrough();
+
 const storeSchema = z
   .object({
     /** Format cursor for THIS file, independent of `config.json`'s `schemaVersion`. Nothing reads
@@ -161,6 +196,12 @@ const storeSchema = z
      * rather than an override.
      */
     defaults: selectionSchema.default(() => ({})).catch(() => ({})),
+    /**
+     * What each Default login is called, when the user named it. The discovered account itself is
+     * still never stored — this is its display name and nothing else, so no id changes and nothing
+     * that chooses an account by id moves. Absent = `Default`.
+     */
+    defaultLabels: defaultLabelsSchema.default(() => ({})).catch(() => ({})),
     /** Repo root → per-provider choice. Per-entry salvage: a bad row is dropped, the rest stay. */
     selections: z
       .record(z.string(), z.unknown())
@@ -178,6 +219,43 @@ const storeSchema = z
   .passthrough();
 
 export type AgentAccountStore = z.infer<typeof storeSchema>;
+
+/**
+ * A fresh folder for an account added on a hosted cockpit, and the id it is filed under (spec
+ * 2026-10-04-hosted-agent-accounts H2): `cezarHomeDir()/accounts/<provider>/<id>/`.
+ *
+ * The id is allocated exactly as a local add allocates it — `allocateProjectSlug` over the label,
+ * deduplicated against `taken` — and additionally SKIPS any candidate whose folder already exists. A
+ * removed account leaves its folder behind (removal only deregisters), and handing that folder to a
+ * new account would silently sign the new account in as the old one.
+ *
+ * Synchronous on purpose: it runs inside `mergeWriteAgentAccounts`' mutator, which stays synchronous
+ * so the read→rename window is small. The leaf is created `0700` and NON-recursively, so two writers
+ * racing for one id cannot both get it: the loser sees `EEXIST` and takes the next candidate.
+ */
+export function allocateManagedAccountDir(
+  provider: ProviderId,
+  label: string,
+  taken: Iterable<string>,
+): { id: string; dir: string } {
+  const root = join(managedAccountsDir(), provider);
+  assertCezarHomeWriteIsSandboxed(root);
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  const used = new Set(taken);
+  for (;;) {
+    const id = allocateProjectSlug(label, used);
+    used.add(id);
+    const dir = join(root, id);
+    if (existsSync(dir)) continue;
+    try {
+      mkdirSync(dir, { mode: 0o700 });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue;
+      throw err;
+    }
+    return { id, dir };
+  }
+}
 
 /** The in-memory default — what a missing file behaves like, and the zero-config state. */
 export function defaultAgentAccountStore(): AgentAccountStore {
@@ -221,15 +299,28 @@ export async function loadAgentAccounts(): Promise<AgentAccountStore> {
  * accounts converge instead of dropping each other's — last-writer-wins only inside the tiny
  * read→rename window, which is the same bargain `config.json` makes. Throws on write failure (a
  * read-only home); degrading is the caller's policy.
+ *
+ * Within ONE process the window is closed outright: writers run one after another (`writeQueue`).
+ * Between processes it stays the bargain above, but a server's own concurrent requests must not
+ * make it — two adds that both read before either wrote would answer 201 for an account the second
+ * rename then erased (and, on a hosted cockpit, orphan its freshly allocated folder).
  */
-export async function mergeWriteAgentAccounts(
+export function mergeWriteAgentAccounts(
   mutator: (store: AgentAccountStore) => AgentAccountStore | void,
 ): Promise<AgentAccountStore> {
-  const current = await loadAgentAccounts();
-  const next = mutator(current) ?? current;
-  atomicWriteJsonSync(agentAccountsPath(), next);
-  return next;
+  const run = writeQueue.then(async () => {
+    const current = await loadAgentAccounts();
+    const next = mutator(current) ?? current;
+    atomicWriteJsonSync(agentAccountsPath(), next);
+    return next;
+  });
+  // A writer that fails rejects its own caller only; the queue behind it keeps moving.
+  writeQueue = run.catch(() => {});
+  return run;
 }
+
+/** The tail of this process's accounts-store writers. Every read-modify-write goes through it. */
+let writeQueue: Promise<unknown> = Promise.resolve();
 
 /**
  * One-time, non-destructive import of accounts that were written into `config.json` by the branch

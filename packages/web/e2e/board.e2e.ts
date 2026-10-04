@@ -47,6 +47,12 @@ async function waitForHealth(url: string): Promise<void> {
 }
 
 async function startRun(url: string, task: string): Promise<string> {
+  // Yield to the event loop first. This suite drives the browser through SYNCHRONOUS calls
+  // (`execFileSync`) that block it for seconds, during which the server closes the idle keep-alive
+  // socket Node's fetch pooled; a request sent at once goes out on that dead socket and answers
+  // `ECONNRESET`. The POST is never retried — it would start a second run. (The same yield, and its
+  // measurements, are in `hosted-accounts-manage.e2e.ts`.)
+  await new Promise<void>((r) => setTimeout(r, 50))
   const response = await fetch(`${url}/api/v1/runs`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
