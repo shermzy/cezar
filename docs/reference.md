@@ -392,6 +392,17 @@ built-in entries. `auto` — send no model at all and let the CLI decide — is
 always available, and a model you pinned by hand stays selectable even when it
 is no longer advertised.
 
+**Cloudflare Workers AI through OpenCode.** OpenCode ships Workers AI as a provider, so its
+models (`cloudflare-workers-ai/@cf/…`) appear in the OpenCode model picker once OpenCode can
+reach them. Log in once with OpenCode itself — `opencode auth login -p cloudflare-workers-ai`
+(or `/connect` in its TUI) — and enter an API token scoped to Workers AI and, when asked, your
+account id. If `CLOUDFLARE_ACCOUNT_ID` is already set in your shell OpenCode does not ask; keep
+it set where cezar runs too, and cezar forwards it to OpenCode. Pick a model that supports tool
+calling (for example `@cf/moonshotai/kimi-k2.7-code`) — a chat-only model cannot edit files.
+cezar never forwards the key from the environment by default, because `CLOUDFLARE_API_KEY` is
+also the name of Cloudflare's account-wide Global API Key; set
+`CEZ_ENV_PASSTHROUGH=CLOUDFLARE_API_KEY` if you deliberately keep a Workers AI token there.
+
 **Pick a backend at three levels** (most specific wins):
 
 1. **Config default** — `"defaultRunner": "codex"` in `.ai/cezar/config.json`.

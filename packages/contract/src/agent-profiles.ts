@@ -117,8 +117,9 @@ export const agentProfilesResponseSchema = z.object({
   editable: z.boolean(),
   profiles: z.array(agentProfileSchema),
   /** Providers that can carry more than one account at all — what "Add account" is offered for.
-   *  OpenCode is absent: its credentials live in a SQLite DB behind a separate `OPENCODE_DB`, so
-   *  a config-dir profile would swap settings while still billing the other account. */
+   *  OpenCode is absent: its credentials live in its data dir (`auth.json`), which no config-dir
+   *  variable moves, so a config-dir profile would swap settings while still billing the other
+   *  account. */
   profileCapableProviders: z.array(providerIdSchema),
   /** Which account each project uses, keyed by the project's realpath'd ROOT.
    *
