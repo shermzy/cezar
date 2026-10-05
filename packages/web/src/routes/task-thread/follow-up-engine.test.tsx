@@ -415,7 +415,7 @@ describe('follow-up ContinueAction runner/model selection (#401)', () => {
 /** One extra Claude login beside the discovered defaults. */
 const ACCOUNTS: AgentProfilesResponse = {
   defaults: {},
-  editable: true,
+  editable: true, manageable: true,
   profileCapableProviders: ['claude', 'codex'],
   selections: {},
   profiles: [

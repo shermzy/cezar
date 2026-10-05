@@ -219,7 +219,7 @@ const openDetails = async (id: string) => {
 
 describe('the agent accounts section', () => {
   it('lists the discovered account with no edit controls at all', async () => {
-    serve({ editable: true, profileCapableProviders: ['claude', 'codex'],
+    serve({ editable: true, manageable: true, profileCapableProviders: ['claude', 'codex'],
       defaults: {},
       selections: {}, profiles: DEFAULTS })
     renderAccounts()
@@ -238,7 +238,7 @@ describe('the agent accounts section', () => {
   it('shows an extra account with its folder as the user wrote it', async () => {
     serve({
       defaults: {},
-      editable: true,
+      editable: true, manageable: true,
       profileCapableProviders: ['claude', 'codex'],
       selections: {},
       profiles: [...DEFAULTS, profile({ id: 'klaudiusz', label: 'Klaudiusz' })],
@@ -257,7 +257,7 @@ describe('the agent accounts section', () => {
   it('says a not-yet-created folder is fine, rather than showing it as broken', async () => {
     serve({
       defaults: {},
-      editable: true,
+      editable: true, manageable: true,
       profileCapableProviders: ['claude', 'codex'],
       selections: {},
       profiles: [...DEFAULTS, profile({ id: 'later', exists: false, looksValid: false })],
@@ -274,7 +274,7 @@ describe('the agent accounts section', () => {
   it('flags an unrecognised folder without refusing it', async () => {
     serve({
       defaults: {},
-      editable: true,
+      editable: true, manageable: true,
       profileCapableProviders: ['claude', 'codex'],
       selections: {},
       profiles: [...DEFAULTS, profile({ id: 'odd', exists: true, looksValid: false })],
@@ -296,7 +296,7 @@ describe('the agent accounts section', () => {
   describe('signing an account in', () => {
     it('offers Connect on an account that is not signed in, aimed at THAT account', async () => {
       serve({
-        editable: true,
+        editable: true, manageable: true,
         profileCapableProviders: ['claude', 'codex'],
         selections: {},
         defaults: {},
@@ -325,7 +325,7 @@ describe('the agent accounts section', () => {
 
     it('sends no profileId for the discovered account — it has no stored id', async () => {
       serve({
-        editable: true,
+        editable: true, manageable: true,
         profileCapableProviders: ['claude', 'codex'],
         selections: {},
         defaults: {},
@@ -352,7 +352,7 @@ describe('the agent accounts section', () => {
 
     it('hides Connect once the account IS signed in, but keeps Check again', async () => {
       serve({
-        editable: true,
+        editable: true, manageable: true,
         profileCapableProviders: ['claude', 'codex'],
         selections: {},
         defaults: {},
@@ -375,7 +375,7 @@ describe('the agent accounts section', () => {
 
     it('re-checks ONE account for real, with refresh=1', async () => {
       serve({
-        editable: true,
+        editable: true, manageable: true,
         profileCapableProviders: ['claude', 'codex'],
         selections: {},
         defaults: {},
@@ -397,7 +397,7 @@ describe('the agent accounts section', () => {
   it('keeps Rename and Remove off the collapsed row, behind Show details', async () => {
     serve({
       defaults: {},
-      editable: true,
+      editable: true, manageable: true,
       profileCapableProviders: ['claude', 'codex'],
       selections: {},
       profiles: [...DEFAULTS, profile({ id: 'klaudiusz', label: 'Klaudiusz' })],
@@ -425,7 +425,7 @@ describe('the agent accounts section', () => {
   it('renames without touching the folder', async () => {
     serve({
       defaults: {},
-      editable: true,
+      editable: true, manageable: true,
       profileCapableProviders: ['claude', 'codex'],
       selections: {},
       profiles: [...DEFAULTS, profile({ id: 'klaudiusz', label: 'Klaudiusz' })],
@@ -444,7 +444,7 @@ describe('the agent accounts section', () => {
   it('confirms a removal by saying what is NOT deleted', async () => {
     serve({
       defaults: {},
-      editable: true,
+      editable: true, manageable: true,
       profileCapableProviders: ['claude', 'codex'],
       selections: {},
       profiles: [...DEFAULTS, profile({ id: 'klaudiusz', label: 'Klaudiusz' })],
@@ -468,7 +468,7 @@ describe('the agent accounts section', () => {
     serve(
       {
         defaults: {},
-        editable: true,
+        editable: true, manageable: true,
         profileCapableProviders: ['claude', 'codex'],
       selections: {},
         profiles: [...DEFAULTS, profile({ id: 'klaudiusz', label: 'Klaudiusz' })],
@@ -496,7 +496,7 @@ describe('the agent accounts section', () => {
       // per account, ~2.5s on a real machine. The row says "Checking…" until its own answer lands,
       // which is a distinct state from any probe RESULT — `unknown` would claim a check that never ran.
       serve({
-        editable: true,
+        editable: true, manageable: true,
         profileCapableProviders: ['claude', 'codex'],
         selections: {},
         profiles: [profile({ id: 'default', label: 'Default', isDefault: true, status: undefined })],
@@ -515,7 +515,7 @@ describe('the agent accounts section', () => {
       // A server whose probe cache was already warm answers inline; re-asking would be a request
       // for something we already have.
       serve({
-        editable: true,
+        editable: true, manageable: true,
         profileCapableProviders: ['claude', 'codex'],
         selections: {},
         profiles: [profile({
@@ -539,7 +539,7 @@ describe('the agent accounts section', () => {
       { id: 'claude.user.memory', label: 'CLAUDE.md', path: '/home/u/.claude/CLAUDE.md', exists: false },
     ]
     const withFiles = () => ({
-      editable: true as const,
+      editable: true as const, manageable: true as const,
       profileCapableProviders: ['claude', 'codex'] as const,
       selections: {},
       profiles: [profile({ id: 'default', label: 'Default', isDefault: true, files: CLAUDE_FILES })],
@@ -699,7 +699,7 @@ describe('the agent accounts section', () => {
    */
   it('survives a server that answers without the additive collections', async () => {
     serve({
-      editable: true,
+      editable: true, manageable: true,
       profiles: [{
         id: 'default',
         provider: 'claude',
@@ -727,23 +727,46 @@ describe('the agent accounts section', () => {
     expect(document.querySelector('[data-action="accounts-add"]')).toBeNull()
   })
 
-  it('withholds every path in hosted mode', async () => {
-    serve({ editable: false, profileCapableProviders: ['claude', 'codex'],
+  it('lists hosted rows with no paths and no actions — and never asks for a status', async () => {
+    // What a hosted cockpit sends (spec 2026-10-04-hosted-agent-accounts H1): no folder, no
+    // existence, no files. One row carries the warmed status; the other has none yet.
+    const hosted = (over: Partial<AgentProfile> & Pick<AgentProfile, 'id'>): AgentProfile => ({
+      provider: 'claude',
+      label: over.id,
+      isDefault: false,
+      ...over,
+    })
+    serve({ editable: false, manageable: false, profileCapableProviders: ['claude', 'codex'],
       defaults: {},
-      selections: {}, profiles: [] })
+      selections: {}, profiles: [
+        hosted({ id: 'default', label: 'Default', isDefault: true, status: { provider: 'claude', status: 'connected' } }),
+        hosted({ id: 'work', label: 'Work' }),
+      ] })
     renderAccounts()
 
-    await waitFor(() =>
-      expect(document.querySelector('[data-slot="accounts-hosted"]')?.textContent).toContain(
-        'hosted mode',
-      ),
+    await waitFor(() => expect(rows()).toHaveLength(2))
+    expect(document.querySelector('[data-slot="accounts-readonly"]')?.textContent).toContain(
+      'Account management is off',
     )
-    expect(rows()).toHaveLength(0)
-    expect(document.querySelector('[data-action="accounts-add"]')).toBeNull()
+    expect(rowFor('default')?.querySelector('[data-slot="account-status"]')?.textContent).toBe('Connected')
+    // No status in the listing reads "Status unknown" — never a "Checking…" that nothing will end:
+    // the per-account probe route is refused here, so it is never called.
+    expect(rowFor('work')?.querySelector('[data-slot="account-status"]')?.textContent).toBe('Status unknown')
+    // Let whatever the rows started on mount reach the network, so "none" is an observation
+    // and not just the first instant after render.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
+    expect(statusReads).toEqual([])
+    // Absent is "not disclosed", never "missing".
+    expect(document.querySelectorAll('[data-slot="account-path"]')).toHaveLength(0)
+    expect(document.querySelectorAll('[data-slot="account-missing"]')).toHaveLength(0)
+    expect(document.body.textContent).not.toContain('folder not created yet')
+    for (const action of ['accounts-add', 'account-connect', 'account-recheck', 'account-details-toggle']) {
+      expect(document.querySelector(`[data-action="${action}"]`), action).toBeNull()
+    }
   })
 
   it('gives every agent a tab, including one that cannot carry a second account', async () => {
-    serve({ editable: true, profileCapableProviders: ['claude', 'codex'],
+    serve({ editable: true, manageable: true, profileCapableProviders: ['claude', 'codex'],
       defaults: {},
       selections: {}, profiles: DEFAULTS })
     renderAccounts()
@@ -759,7 +782,7 @@ describe('the agent accounts section', () => {
   })
 
   it('offers no Add on an agent that cannot carry a second account, and says why', async () => {
-    serve({ editable: true, profileCapableProviders: ['claude', 'codex'],
+    serve({ editable: true, manageable: true, profileCapableProviders: ['claude', 'codex'],
       defaults: {},
       selections: {}, profiles: DEFAULTS })
     renderAccounts()
@@ -772,7 +795,7 @@ describe('the agent accounts section', () => {
   })
 
   it('reports what the MACHINE has for the active agent, not per account', async () => {
-    serve({ editable: true, profileCapableProviders: ['claude', 'codex'],
+    serve({ editable: true, manageable: true, profileCapableProviders: ['claude', 'codex'],
       defaults: {},
       selections: {}, profiles: DEFAULTS })
     renderAccounts()
@@ -785,7 +808,7 @@ describe('the agent accounts section', () => {
   })
 
   it('names the install command for an agent that is not on this machine', async () => {
-    serve({ editable: true, profileCapableProviders: ['claude', 'codex'],
+    serve({ editable: true, manageable: true, profileCapableProviders: ['claude', 'codex'],
       defaults: {},
       selections: {}, profiles: DEFAULTS })
     renderAccounts()
@@ -815,7 +838,7 @@ describe('the add-account dialog', () => {
   const confirmButton = () => document.querySelector<HTMLButtonElement>('[data-slot="add-account-confirm"]')!
 
   it('accepts a hand-typed `~` folder that does not exist yet', async () => {
-    serve({ editable: true, profileCapableProviders: ['claude', 'codex'],
+    serve({ editable: true, manageable: true, profileCapableProviders: ['claude', 'codex'],
       defaults: {},
       selections: {}, profiles: DEFAULTS })
     renderAccounts()
@@ -836,7 +859,7 @@ describe('the add-account dialog', () => {
   })
 
   it('refuses an empty folder without sending anything', async () => {
-    serve({ editable: true, profileCapableProviders: ['claude', 'codex'],
+    serve({ editable: true, manageable: true, profileCapableProviders: ['claude', 'codex'],
       defaults: {},
       selections: {}, profiles: DEFAULTS })
     renderAccounts()
@@ -848,7 +871,7 @@ describe('the add-account dialog', () => {
   })
 
   it('asks the browser for HIDDEN folders — otherwise it lists no candidate at all', async () => {
-    serve({ editable: true, profileCapableProviders: ['claude', 'codex'],
+    serve({ editable: true, manageable: true, profileCapableProviders: ['claude', 'codex'],
       defaults: {},
       selections: {}, profiles: DEFAULTS })
     renderAccounts()
@@ -865,7 +888,7 @@ describe('the add-account dialog', () => {
   })
 
   it('browsing FILLS the folder field rather than replacing it as a hidden selection', async () => {
-    serve({ editable: true, profileCapableProviders: ['claude', 'codex'],
+    serve({ editable: true, manageable: true, profileCapableProviders: ['claude', 'codex'],
       defaults: {},
       selections: {}, profiles: DEFAULTS })
     renderAccounts()
@@ -884,7 +907,7 @@ describe('the add-account dialog', () => {
   })
 
   it('opens on the agent whose own Add button was clicked', async () => {
-    serve({ editable: true, profileCapableProviders: ['claude', 'codex'],
+    serve({ editable: true, manageable: true, profileCapableProviders: ['claude', 'codex'],
       defaults: {},
       selections: {}, profiles: DEFAULTS })
     renderAccounts()
@@ -898,7 +921,7 @@ describe('the add-account dialog', () => {
 
   it("shows the server's refusal verbatim", async () => {
     serve(
-      { editable: true, profileCapableProviders: ['claude', 'codex'],
+      { editable: true, manageable: true, profileCapableProviders: ['claude', 'codex'],
         defaults: {},
       selections: {}, profiles: DEFAULTS },
       { createStatus: 409, createError: "that is already this agent's default folder" },
