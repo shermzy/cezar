@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import { AgentBrowser, bootProjectId, cezarCli, fixtureServeEnv, getJson } from './agent-browser'
+import { monitorOwnedServer } from './owned-server'
 
 /**
  * Hosted agent accounts, phase H1 (spec `.ai/specs/2026-10-04-hosted-agent-accounts.md`): a cockpit
@@ -23,6 +24,7 @@ const sessionId = `e2e-hosted-accounts-list-${process.pid}`
 
 let browser: AgentBrowser
 let server: ChildProcess
+let serverOwnership: ReturnType<typeof monitorOwnedServer>
 let dataRoot: string
 /** This suite's own `CEZ_HOME`: where `agent-accounts.json` lives. */
 let cezHome: string
@@ -113,11 +115,19 @@ beforeAll(async () => {
 
   const port = await freePort()
   baseUrl = `http://localhost:${port}`
-  server = spawn(process.execPath, [cezarCli, 'serve', '--repo', dataRoot, '--port', String(port), '--no-open'], {
+  const shutdownPreload = join(import.meta.dirname, 'shutdown-preload.cjs')
+  server = spawn(process.execPath, ['--require', shutdownPreload, cezarCli, 'serve', '--repo', dataRoot, '--port', String(port), '--no-open'], {
     env,
-    stdio: 'ignore',
+    stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+  })
+  serverOwnership = monitorOwnedServer(server, {
+    task: 'hosted-accounts-list E2E',
+    purpose: 'temporary dry-run cezar server and fixture-owned agent children',
+    artifactPath: `${artifactsDir}/owned-process-hosted-accounts-list-${process.pid}.json`,
+    baseUrl,
   })
   await waitForHealth(baseUrl)
+  await serverOwnership.capture()
   bootProject = await bootProjectId(baseUrl)
 
   browser = AgentBrowser.open(sessionId)
@@ -125,31 +135,21 @@ beforeAll(async () => {
 }, 120_000)
 
 afterAll(async () => {
-  browser?.close()
-  // Only while the child is still ours and alive: once Node has reaped it, Windows may hand its PID
-  // to an unrelated process, and `taskkill /T /F` on that would end somebody else's tree.
-  if (server?.pid !== undefined && server.exitCode === null && server.signalCode === null) {
-    const exited = new Promise<void>((done) => server.once('exit', () => done()))
-    if (process.platform === 'win32') {
-      // `server.kill()` ends only the cezar process and orphans its dry-run mock agents on Windows.
-      // This is the tree this suite spawned itself, so ending all of it is safe.
-      try {
-        execFileSync('taskkill', ['/PID', String(server.pid), '/T', '/F'], { stdio: 'ignore' })
-      } catch {
-        /* already gone */
-      }
-    } else {
-      server.kill()
-    }
-    let timer: NodeJS.Timeout | undefined
-    const gaveUp = new Promise<void>((done) => {
-      timer = setTimeout(done, 10_000)
-    })
-    await Promise.race([exited, gaveUp])
-    clearTimeout(timer)
+  let cleanupError: unknown
+  try {
+    browser?.close()
+  } catch (error) {
+    cleanupError = error
   }
-  // Windows keeps the killed server's handles for a beat — retry instead of failing on EBUSY.
-  if (dataRoot) rmSync(dataRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  if (serverOwnership) {
+    try {
+      await serverOwnership.stopAndVerify()
+    } catch (error) {
+      cleanupError ??= error
+    }
+  }
+  if (dataRoot && !cleanupError) rmSync(dataRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  if (cleanupError) throw cleanupError
 }, 90_000)
 
 describe('hosted agent accounts — the read-only list (H1)', () => {
