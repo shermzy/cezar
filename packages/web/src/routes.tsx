@@ -33,6 +33,7 @@ import {
 } from './routes/settings/settings-shell'
 import { TasksOverviewRoute } from './routes/tasks-overview'
 import { GlobalTasksRoute } from './routes/global-tasks'
+import { AgentsRoute } from './routes/agents'
 
 // Dashboard charts, drag controls and exports are paid for only on this route.
 const DashboardRoute = lazy(() =>
@@ -336,6 +337,7 @@ export const AppRoutes = memo(function AppRoutes() {
       <Route path="/p/:projectId" element={<ProjectScopeRoute />}>
         <Route index element={<TasksOverviewRoute />} />
         <Route path="new" element={<NewTaskProjectRoute />} />
+        <Route path="agents" element={<AgentsRoute />} />
 
         <Route
           path="tasks/:id"

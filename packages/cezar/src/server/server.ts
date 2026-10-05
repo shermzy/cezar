@@ -31,7 +31,7 @@ import { trackerTriggerSchema, trackerAutomationOptionsSchema, trackerAutomation
 import type { IncomingMessage } from 'node:http';
 import { access, constants as fsConstants, mkdir, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Hono, type Context } from 'hono';
 import type { Next } from 'hono';
@@ -59,6 +59,20 @@ import {
   updateProjectInputSchema,
 } from '@open-mercato/cezar-contract';
 import { dispatchInputSchema, dispatchIntentSchema, dispatchReportSchema } from '@open-mercato/cezar-contract';
+import {
+  specialistCreateSchema,
+  specialistIdParamSchema,
+  specialistIdSchema,
+  specialistUpdateSchema,
+} from '@open-mercato/cezar-contract';
+import {
+  createSpecialist,
+  deleteSpecialist,
+  listSpecialists,
+  resolveSpecialist,
+  SpecialistStoreError,
+  updateSpecialist,
+} from '../workspace/specialists.ts';
 import { detectEnvironment } from '../core/backend-detect.ts';
 import { hostUsageSampler, type HostSampler } from '../core/host-usage.ts';
 import { RUNNER_IDS } from '../core/agent-runner.ts';
@@ -670,6 +684,8 @@ const startRunSchema = z
     // own selection, then the discovered default. Bounded like a profile id in the workspace
     // schema, so a value this route accepts can never be degraded away by the next load.
     agentProfile: z.string().max(64).optional(),
+    /** Workspace role ID; resolved into an immutable prompt snapshot before the run is queued. */
+    specialistId: specialistIdSchema.optional(),
     // Parallel variants (spec 010): ×2/×3 runs the task as 2–3 competing
     // agents in separate worktrees; the user compares diffs and picks one.
     variants: z.number().int().min(1).max(3).optional(),
@@ -2787,7 +2803,7 @@ export function createApp(deps: ServerDeps) {
     // dialog hands back absolute paths, but a hand-written body (curl, a
     // future CLI) spells home the way a shell does.
     const requested = expandTilde(spelled);
-    if (!requested.startsWith('/')) {
+    if (!isAbsolute(requested)) {
       return {
         status: 400,
         body: { error: `not a folder: ${spelled} is not an absolute path` },
@@ -3999,7 +4015,10 @@ export function createApp(deps: ServerDeps) {
      *  reason — the same text the parent's transcript notes. */
     .post('/runs/:id/dispatch', jsonZodValidator(dispatchInputSchema), (c) => {
       const { manager } = c.get('project');
-      const outcome = manager.dispatch(c.req.param('id'), c.req.valid('json'));
+      const input = c.req.valid('json');
+      const specialistSnapshot = input.specialistId ? resolveSpecialist(input.specialistId) : undefined;
+      if (input.specialistId && !specialistSnapshot) return c.json({ error: 'specialist not found' }, 400);
+      const outcome = manager.dispatch(c.req.param('id'), input, specialistSnapshot);
       if ('refused' in outcome) return c.json({ error: outcome.refused }, 409);
       return c.json(outcome, 201);
     })
@@ -4106,6 +4125,8 @@ export function createApp(deps: ServerDeps) {
     .post('/runs', jsonZodValidator(startRunSchema), async (c) => {
       const { root: repoRoot, dataDir, manager } = c.get('project');
       const parsed = { data: c.req.valid('json') };
+      const specialistSnapshot = parsed.data.specialistId ? resolveSpecialist(parsed.data.specialistId) : undefined;
+      if (parsed.data.specialistId && !specialistSnapshot) return c.json({ error: 'specialist not found' }, 400);
       if (agentModelsLocked(repoRoot) && parsed.data.model?.trim()) {
         return c.json({ error: AGENT_MODELS_LOCKED_ERROR }, 409);
       }
@@ -4155,6 +4176,7 @@ export function createApp(deps: ServerDeps) {
         model: parsed.data.model,
         runner: parsed.data.runner,
         agentProfile: parsed.data.agentProfile,
+        ...(specialistSnapshot ? { specialistSnapshot } : {}),
         images,
         systemPrompt: parsed.data.systemPrompt,
         worktree: parsed.data.worktree,
@@ -6290,6 +6312,9 @@ export function createApp(deps: ServerDeps) {
           },
         }
       : {}),
+    ...(run.specialistSnapshot !== undefined
+      ? { specialist: { id: run.specialistSnapshot.id, name: run.specialistSnapshot.name } }
+      : {}),
     ...(run.startedAt !== undefined ? { startedAt: run.startedAt } : {}),
     // The tracker-reference inputs, verbatim — the cockpit's `taskReference()` owns the rule
     // that picks between them (see the schema's note).
@@ -6322,6 +6347,49 @@ export function createApp(deps: ServerDeps) {
    * which would build a context, prune worktrees and `recover()` running agents. Typing in a
    * search box must not resume work; see `runs/run-index.ts`.
    */
+  const specialistsRoutes = new Hono()
+    .get('/workspace/specialists', (c) => c.json({ specialists: listSpecialists() }))
+    .post('/workspace/specialists', jsonZodValidator(specialistCreateSchema), (c) => {
+      try {
+        return c.json({ specialist: createSpecialist(c.req.valid('json')) }, 201);
+      } catch (error) {
+        if (!(error instanceof SpecialistStoreError)) throw error;
+        return c.json(
+          { error: error.message },
+          error.code === 'unavailable' ? 503 : error.code === 'full' ? 409 : 400,
+        );
+      }
+    })
+    .patch(
+      '/workspace/specialists/:id',
+      paramZodValidator(specialistIdParamSchema),
+      jsonZodValidator(specialistUpdateSchema),
+      (c) => {
+        try {
+          const { id } = c.req.valid('param');
+          return c.json({ specialist: updateSpecialist(id, c.req.valid('json')) });
+        } catch (error) {
+          if (!(error instanceof SpecialistStoreError)) throw error;
+          return c.json(
+            { error: error.message },
+            error.code === 'unavailable' ? 503 : error.code === 'not-found' ? 404 : 409,
+          );
+        }
+      },
+    )
+    .delete('/workspace/specialists/:id', paramZodValidator(specialistIdParamSchema), (c) => {
+      try {
+        deleteSpecialist(c.req.valid('param').id);
+        return c.json({ ok: true as const });
+      } catch (error) {
+        if (!(error instanceof SpecialistStoreError)) throw error;
+        return c.json(
+          { error: error.message },
+          error.code === 'unavailable' ? 503 : error.code === 'not-found' ? 404 : 409,
+        );
+      }
+    });
+
   const runsIndexRoutes = new Hono()
     .get('/workspace/runs-index', async (c) => {
       let projects: ProjectListEntry[] = [];
@@ -6436,6 +6504,7 @@ export function createApp(deps: ServerDeps) {
     .route('/', workspaceConfigRoutes)
     .route('/', fsBrowseRoutes)
     .route('/', automationChecksRoutes)
+    .route('/', specialistsRoutes)
     .route('/', runsIndexRoutes)
     .route('/', dashboardRoutes(dashboard, () => ({ tokens: capabilities().tokenUsageMetrics, cost: capabilities().costMetrics }), () => capabilities().automations))
     .route('/', workspaceEventsRoutes);

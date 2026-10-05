@@ -1,0 +1,44 @@
+{
+  "result": "passed",
+  "role": {
+    "id": "custom-0d6ef126-a3cb-4390-8cbe-88af0597dbbb",
+    "name": "Release note writer"
+  },
+  "projects": [
+    "cezar-e2e-specialists-a-4tdksi",
+    "cezar-e2e-specialists-b-4zvr5c"
+  ],
+  "assignments": [
+    {
+      "projectId": "cezar-e2e-specialists-a-4tdksi",
+      "runId": "f10a9276-93bb-4200-bdc9-8ad7f8575ce7",
+      "status": "queued"
+    },
+    {
+      "projectId": "cezar-e2e-specialists-b-4zvr5c",
+      "runId": "b10aa615-472f-4606-82f6-2e7361643808",
+      "status": "queued"
+    }
+  ],
+  "dispatchChild": {
+    "projectId": "cezar-e2e-specialists-a-4tdksi",
+    "runId": "9de95402-6f39-403a-b17c-21434611d65d"
+  },
+  "screenshots": [
+    "workspace-specialists.png"
+  ],
+  "verified": [
+    "idle roster caused no run",
+    "one role assigned to two project-scoped runs",
+    "same-project dispatch preserves the selected specialist snapshot and parent link",
+    "run snapshots and workspace index preserve role identity",
+    "task thread links back to its specialist",
+    "assignments carry no account or session identity"
+  ],
+  "reviewGate": {
+    "ordinaryHumanReview": true,
+    "note": "Dry-run assignments generated no diff, so the gate itself was not entered."
+  },
+  "rejectedRemovedRole": true,
+  "serverCleanup": "exited:signal"
+}
