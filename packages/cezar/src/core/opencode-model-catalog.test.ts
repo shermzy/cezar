@@ -224,6 +224,46 @@ describe('parseOpencodeModels', () => {
     ]);
   });
 
+  // F6 (spec 2026-10-04-cloudflare-workers-ai): Workers AI model ids start with `@cf/` / `@hf/`.
+  it('keeps Cloudflare Workers AI ids, whose model segment starts with `@`', () => {
+    expect(
+      parseOpencodeModels(
+        [
+          'cloudflare-workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast',
+          'cloudflare-workers-ai/@hf/thebloke/deepseek-coder-6.7b-instruct-awq',
+        ].join('\n'),
+      ),
+    ).toEqual([
+      {
+        id: 'cloudflare-workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast',
+        label: 'cloudflare-workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast',
+        description: 'via cloudflare-workers-ai',
+      },
+      {
+        id: 'cloudflare-workers-ai/@hf/thebloke/deepseek-coder-6.7b-instruct-awq',
+        label: 'cloudflare-workers-ai/@hf/thebloke/deepseek-coder-6.7b-instruct-awq',
+        description: 'via cloudflare-workers-ai',
+      },
+    ]);
+  });
+
+  // F7: the `@` is allowed only as the first character of the model segment.
+  it('still refuses `@` anywhere else, and every other non-id line', () => {
+    expect(
+      parseOpencodeModels(
+        [
+          '@x/model',
+          'provider/@',
+          'provider/@@cf/x',
+          'provider/a@b',
+          'provider/@cf x',
+          'Providers: 3',
+          'openai/gpt-5.4',
+        ].join('\n'),
+      ),
+    ).toEqual([{ id: 'openai/gpt-5.4', label: 'openai/gpt-5.4', description: 'via openai' }]);
+  });
+
   it('refuses a listing longer than the size cap', () => {
     const flood = Array.from({ length: 501 }, (_, i) => `openai/gpt-${i}`).join('\n');
     expect(() => parseOpencodeModels(flood)).toThrow('size limit');
