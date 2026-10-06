@@ -60,8 +60,10 @@ CEZ_AUTH_REQUIRED=1 npx cezar-run server-install --platform macosx-ngrok --recon
 
 The first restart enables Cezar auth but retains ngrok Basic Auth until an owner
 exists. The final reconfigure verifies the auth session and an anonymous 401
-before removing `--basic-auth`. If launchd cannot reload the changed plist, the
-installer restores the previous plist and tunnel. For PowerShell, set
+before removing `--basic-auth`. The managed ngrok agent also replaces any
+incoming `X-Real-IP` with the client IP before forwarding it to Cezar. If
+launchd cannot reload the changed plist, the installer restores the previous
+plist and tunnel. For PowerShell, set
 `$env:CEZ_AUTH_REQUIRED='1'` before running the CLI.
 
 ---

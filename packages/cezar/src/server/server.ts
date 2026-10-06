@@ -1175,7 +1175,7 @@ export function createApp(deps: ServerDeps) {
     const token = authSessionToken(cookie);
     let member: ReturnType<typeof findSession>;
     try { member = token ? findSession(token) : null; } catch { member = null; }
-    if (!token || !member || member.role !== 'owner') {
+    if (!token || !member || member.role !== 'owner' || !authStoreReady()) {
       stream.abort();
       return async () => {};
     }
@@ -1199,7 +1199,7 @@ export function createApp(deps: ServerDeps) {
       if (stream.aborted) return;
       let current: ReturnType<typeof findSession>;
       try { current = findSession(token); } catch { current = null; }
-      if (!current || current.id !== userId || current.role !== 'owner') {
+      if (!current || current.id !== userId || current.role !== 'owner' || !authStoreReady()) {
         revoke();
         return;
       }
@@ -1554,13 +1554,6 @@ export function createApp(deps: ServerDeps) {
   // deny; viewers get one server-filtered summary plus their own session/logout.
   app.use('/api/*', async (c, next) => {
     if (process.env.CEZ_AUTH_REQUIRED !== '1' || c.req.path === `${V1_PREFIX}/health`) return next();
-    try {
-      if (!authStoreReady()) return c.json({ error: 'Managed access is enabled but its store is unavailable. Repair it with the local Cezar auth command.' }, 503);
-    } catch (error) {
-      if (error instanceof AuthStoreError) return c.json({ error: error.message }, 503);
-      throw error;
-    }
-
     const path = c.req.path;
     const publicPost = c.req.method === 'POST' && (path === `${V1_PREFIX}/auth/login` || path === `${V1_PREFIX}/auth/invites/accept`);
     if (publicPost) {
@@ -1579,7 +1572,10 @@ export function createApp(deps: ServerDeps) {
     const bearer = c.req.header('authorization')?.match(/^Bearer\s+(.+)$/i)?.[1];
     if (bearer) {
       const body = MUTATING_METHODS.has(c.req.method) ? await c.req.raw.clone().json().catch(() => undefined) : undefined;
-      if (await verifyInternalCapability(bearer, c.req.method, path, body)) return next();
+      if (await verifyInternalCapability(bearer, c.req.method, path, body)) {
+        if (!authStoreReady()) return c.json({ error: 'Managed access is enabled but its store is unavailable. Repair it with the local Cezar auth command.' }, 503);
+        return next();
+      }
     }
 
     const token = authSessionToken(c.req.header('cookie'));
@@ -1605,6 +1601,7 @@ export function createApp(deps: ServerDeps) {
       const logout = c.req.method === 'POST' && path === `${V1_PREFIX}/auth/logout`;
       if (!viewerRead && !sessionRead && !logout) return c.json({ error: 'owner access required' }, 403);
     }
+    if (!authStoreReady()) return c.json({ error: 'Managed access is enabled but its store is unavailable. Repair it with the local Cezar auth command.' }, 503);
     return next();
   });
 
@@ -1869,7 +1866,7 @@ export function createApp(deps: ServerDeps) {
       try {
         const token = authSessionToken(c.req.header('cookie'));
         const member = token ? findSession(token) : null;
-        if (!member || member.role !== 'owner') return c.json(minimalAuthHealth());
+        if (!member || member.role !== 'owner' || !authStoreReady()) return c.json(minimalAuthHealth());
       } catch {
         return c.json(minimalAuthHealth());
       }
@@ -6873,10 +6870,16 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
     const verdict = verifyWsUpgrade(req, deps.bindHost);
     if (!verdict || process.env.CEZ_AUTH_REQUIRED !== '1') return verdict;
     try {
-      if (!authStoreReady()) return false;
       const token = authSessionToken(typeof req.headers.cookie === 'string' ? req.headers.cookie : undefined);
       const member = token ? findSession(token) : null;
-      return member?.role === 'owner' ? { ...verdict, authUserId: member.id } : false;
+      return member?.role === 'owner' && authStoreReady() ? { ...verdict, authUserId: member.id, authSessionToken: token } : false;
+    } catch {
+      return false;
+    }
+  }, (userId, token) => {
+    try {
+      const member = findSession(token);
+      return member?.id === userId && member.role === 'owner' && authStoreReady();
     } catch {
       return false;
     }

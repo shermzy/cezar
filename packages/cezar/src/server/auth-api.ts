@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { isIP } from 'node:net';
 import {
   authAcceptInviteInputSchema,
   authAcceptInviteResponseSchema,
@@ -16,6 +17,7 @@ import {
 } from '@open-mercato/cezar-contract';
 import { jsonZodValidator, paramZodValidator } from './validators.ts';
 import {
+  authStoreReady,
   acceptInvite,
   AuthStoreError,
   createInvite,
@@ -70,18 +72,38 @@ function memberForRequest(cookie: string | undefined): AuthMember | null {
   return token ? findSession(token) : null;
 }
 
+function authAttemptSource(remoteAddress: string | undefined, xRealIp: string | undefined): string {
+  const forwardedAddress = xRealIp?.trim();
+  return process.env.CEZ_AUTH_TRUST_PROXY === '1' && forwardedAddress && isIP(forwardedAddress)
+    ? forwardedAddress
+    : remoteAddress ?? 'unknown';
+}
+
 export function createAuthRoutes(deps: AuthApiDeps) {
   const attempts = new Map<string, number[]>();
+  const windowMs = 15 * 60_000;
+  const maxSourceBuckets = 2000;
   const enabled = () => process.env.CEZ_AUTH_REQUIRED === '1';
   const disabled = (c: { json(body: { error: string }, status: 409): Response }) => c.json({ error: 'Managed access is disabled.' }, 409);
-  const allowed = (key: string): boolean => {
+  const allowed = (keys: Array<{ key: string; limit: number }>): boolean => {
     const now = Date.now();
-    const recent = (attempts.get(key) ?? []).filter((time) => now - time < 15 * 60_000);
-    if (recent.length >= 12) return false;
-    recent.push(now);
-    attempts.set(key, recent);
-    if (attempts.size > 2000) {
-      for (const [candidate, times] of attempts) if (times.every((time) => now - time >= 15 * 60_000)) attempts.delete(candidate);
+    for (const [candidate, times] of attempts) {
+      const recent = times.filter((time) => now - time < windowMs);
+      if (recent.length) attempts.set(candidate, recent);
+      else attempts.delete(candidate);
+    }
+    const recentByKey = keys.map(({ key, limit }) => ({ key, limit, recent: attempts.get(key) ?? [] }));
+    if (recentByKey.some(({ recent, limit }) => recent.length >= limit)) return false;
+    // ponytail: cap memory at 2,000 attempt buckets; eviction shortens an old bucket's cooldown under source rotation.
+    const newKeys = new Set(recentByKey.filter(({ key }) => !attempts.has(key)).map(({ key }) => key));
+    while (attempts.size + newKeys.size > maxSourceBuckets) {
+      const oldest = attempts.keys().next().value;
+      if (oldest === undefined) break;
+      attempts.delete(oldest);
+    }
+    for (const { key, recent } of recentByKey) {
+      recent.push(now);
+      attempts.set(key, recent);
     }
     return true;
   };
@@ -89,21 +111,32 @@ export function createAuthRoutes(deps: AuthApiDeps) {
   return new Hono()
     .get('/auth/session', (c) => {
       if (!enabled()) return c.json(authSessionResponseSchema.parse({ authRequired: false, authenticated: false, member: null }));
-      const token = authSessionToken(c.req.header('cookie'));
-      const member = token ? findSession(token) : null;
-      return c.json(authSessionResponseSchema.parse({
-        authRequired: process.env.CEZ_AUTH_REQUIRED === '1',
-        authenticated: Boolean(member),
-        member,
-        ...(member && token ? { csrfToken: csrfTokenForSession(token) } : {}),
-      }));
+      try {
+        const token = authSessionToken(c.req.header('cookie'));
+        const member = token ? findSession(token) : null;
+        if (member && !authStoreReady()) return c.json({ error: 'Managed access is enabled but its store is unavailable. Repair it with the local Cezar auth command.' }, 503);
+        return c.json(authSessionResponseSchema.parse({
+          authRequired: process.env.CEZ_AUTH_REQUIRED === '1',
+          authenticated: Boolean(member),
+          member,
+          ...(member && token ? { csrfToken: csrfTokenForSession(token) } : {}),
+        }));
+      } catch (error) {
+        if (error instanceof AuthStoreError) return c.json({ error: error.message }, 503);
+        throw error;
+      }
     })
     .post('/auth/login', jsonZodValidator(authLoginInputSchema), async (c) => {
       if (!enabled()) return disabled(c);
       const body = c.req.valid('json');
-      const addr = (c.env as { incoming?: { socket?: { remoteAddress?: string } } }).incoming?.socket?.remoteAddress ?? 'unknown';
-      const key = `${addr}:${body.username.trim().toLowerCase()}`;
-      if (!allowed(key)) return c.json({ error: 'Too many sign-in attempts. Try again later.' }, 429);
+      const remoteAddress = (c.env as { incoming?: { socket?: { remoteAddress?: string } } }).incoming?.socket?.remoteAddress;
+      const addr = authAttemptSource(remoteAddress, c.req.header('x-real-ip'));
+      const username = body.username.trim().toLowerCase();
+      if (!allowed([
+        { key: `login-source:${addr}`, limit: 60 },
+        { key: `login-user:${addr}:${username}`, limit: 12 },
+      ])) return c.json({ error: 'Too many sign-in attempts. Try again later.' }, 429);
+      if (!authStoreReady()) return c.json({ error: 'Managed access is enabled but its store is unavailable. Repair it with the local Cezar auth command.' }, 503);
       try {
         const result = await login(body.username, body.password);
         if (!result) return c.json({ error: 'Username or password is incorrect.' }, 401);
@@ -129,8 +162,10 @@ export function createAuthRoutes(deps: AuthApiDeps) {
     .post('/auth/invites/accept', jsonZodValidator(authAcceptInviteInputSchema), async (c) => {
       if (!enabled()) return disabled(c);
       const body = c.req.valid('json');
-      const key = `invite:${(c.env as { incoming?: { socket?: { remoteAddress?: string } } }).incoming?.socket?.remoteAddress ?? 'unknown'}`;
-      if (!allowed(key)) return c.json({ error: 'Too many invitation attempts. Try again later.' }, 429);
+      const remoteAddress = (c.env as { incoming?: { socket?: { remoteAddress?: string } } }).incoming?.socket?.remoteAddress;
+      const addr = authAttemptSource(remoteAddress, c.req.header('x-real-ip'));
+      if (!allowed([{ key: `invite-source:${addr}`, limit: 12 }])) return c.json({ error: 'Too many invitation attempts. Try again later.' }, 429);
+      if (!authStoreReady()) return c.json({ error: 'Managed access is enabled but its store is unavailable. Repair it with the local Cezar auth command.' }, 503);
       try {
         const result = await acceptInvite(body.token, body.username, body.password);
         if (!result) return c.json({ error: 'This invitation is invalid, expired, or already used.' }, 400);

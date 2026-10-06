@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID, scryptSync, timingSafeEqual, createHash, createHmac } from 'node:crypto';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, openSync, closeSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { accessSync, chmodSync, copyFileSync, constants, existsSync, lstatSync, mkdirSync, openSync, closeSync, readFileSync, readdirSync, unlinkSync, writeSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import lockfile from 'proper-lockfile';
 import { z } from 'zod';
 import { cezarHomeDir } from '../paths.ts';
@@ -81,7 +81,48 @@ export function authStorePath(): string {
 }
 
 export function authStoreReady(): boolean {
-  return readStore() !== null;
+  const path = authStorePath();
+  const probe = join(dirname(path), `.auth-write-check-${process.pid}-${randomBytes(8).toString('hex')}`);
+  let fd: number | undefined;
+  let created = false;
+  try {
+    if (!readStore(path)) return false;
+    // A writable directory alone does not prove existing auth files can be updated.
+    // Check the store itself and the lock file that every mutation opens for append.
+    const storeFd = openSync(path, 'r+');
+    closeSync(storeFd);
+    const lockPath = join(dirname(path), LOCK_FILE);
+    if (existsSync(lockPath)) {
+      const lockFd = openSync(lockPath, 'a');
+      closeSync(lockFd);
+    }
+    // proper-lockfile acquires the lock by creating this directory. An active
+    // lock is valid, but a file or nonempty/unwritable directory cannot be used.
+    const sidecarPath = `${lockPath}.lock`;
+    let sidecar: ReturnType<typeof lstatSync> | undefined;
+    try { sidecar = lstatSync(sidecarPath); }
+    catch (error) {
+      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
+    }
+    if (sidecar) {
+      if (!sidecar.isDirectory()) return false;
+      accessSync(sidecarPath, constants.R_OK | constants.W_OK);
+      if (readdirSync(sidecarPath).length !== 0) return false;
+    }
+    accessSync(dirname(path), constants.W_OK);
+    fd = openSync(probe, 'wx', 0o600);
+    created = true;
+    writeSync(fd, 'x');
+    closeSync(fd);
+    fd = undefined;
+    unlinkSync(probe);
+    created = false;
+    return true;
+  } catch {
+    if (fd !== undefined) try { closeSync(fd); } catch { /* cleanup below */ }
+    if (created) try { unlinkSync(probe); } catch { /* leave only an empty probe on a read-only transition */ }
+    return false;
+  }
 }
 
 export function csrfTokenForSession(token: string): string {
@@ -92,8 +133,7 @@ function emptyStore(): AuthStore {
   return { version: 1, users: [], sessions: [], invites: [], audit: [] };
 }
 
-function readStore(): AuthStore | null {
-  const path = authStorePath();
+function readStore(path = authStorePath()): AuthStore | null {
   if (!existsSync(path)) return null;
   try {
     const parsed = authStoreSchema.safeParse(JSON.parse(readFileSync(path, 'utf8')));
@@ -226,13 +266,15 @@ export async function repairOwner(usernameInput: string, password: string): Prom
 
 export async function login(usernameInput: string, password: string): Promise<{ token: string; member: AuthMember } | null> {
   const username = usernameInput.trim().toLowerCase();
-  return mutateStore((store, existed) => {
-    if (!existed) return null;
+  return withAuthLock(() => {
+    const store = readStore();
+    if (!store) return null;
     const user = store.users.find((candidate) => candidate.username === username);
     const dummy = { salt: '00000000000000000000000000000000', hash: '00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000' };
     const valid = passwordMatches(password.slice(0, 1024), user?.password ?? dummy as AuthUser['password']) && password.length <= 1024;
     if (!user || user.status !== 'active' || !valid) return null;
     const token = newSession(store, user.id);
+    atomicWriteJsonSync(authStorePath(), store);
     return { token, member: memberOf(user) };
   });
 }

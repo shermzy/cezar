@@ -300,6 +300,7 @@ Useful environment variables:
 | `CEZ_DRY_RUN=1` | Use the bundled mock instead of the real `claude` CLI — the entire cockpit works offline, for demos and development. |
 | `CEZ_INSTANCE_ID` | Internal server-install identity set automatically in generated systemd/launchd services; normally leave unset. It is surfaced additively by `/api/v1/health` for install verification. |
 | `CEZ_AUTH_REQUIRED=1` | Require managed Cezar logins for every cockpit/API request. Off by default. Persist it in the service launcher and restart before bootstrapping the owner; `server-install` preserves it on reconfigure. Owners manage accounts, project grants, and session revocation in Settings → Members. |
+| `CEZ_AUTH_TRUST_PROXY=1` | Use a validated `X-Real-IP` as the login rate-limit source. Bundled nginx/ngrok installers configure and overwrite this header. For a custom proxy, enable it only when the proxy replaces the header with the actual client IP and the Cezar listener is not reachable around that proxy. |
 | `CEZ_AGENT_MODELS_LOCKED=1` | Globally lock each runner to the model configured in its native Claude/Codex/OpenCode settings while keeping runner selection available. Exact `1` also delegates authentication and provider enablement to those native agents, so Cezar skips its credential probes and provider-disable preferences. Existing Cezar presets are preserved but ignored, and an environment change requires a restart. The config-file equivalent is `"modelsLocked": true` in global `~/.cezar/config.json` or one repository's `.ai/cezar/config.json`; config-file locks do not disable provider checks. |
 | `CEZ_APPROVAL_GATE=1` | Opt into Claude's interactive approval UI; by default, unapproved tools are denied without interrupting the run. |
 | `CEZ_FOLLOWUPS=1` | Turn on the global follow-up **Inbox**: agents are asked to leave follow-ups in `todos.json` when they finish, and the Inbox view appears. Off by default — each task's own **Notes** handoff journal runs either way. |
@@ -497,7 +498,10 @@ remains an owner privilege.
 1. Persist `CEZ_AUTH_REQUIRED=1` in the Cezar service launcher and restart it.
    For a managed Ubuntu/macOS install, set that variable in the shell and run
    `cezar server-install --reconfigure autostart`; for a custom service, edit
-   its launcher and restart it yourself.
+   its launcher and restart it yourself. Custom reverse proxies must also
+   replace `X-Real-IP` with the connecting client's address; set
+   `CEZ_AUTH_TRUST_PROXY=1` in that launcher only when the Cezar listener is
+   reachable solely through that proxy.
 2. In a local interactive shell using the service account and the same
    `CEZ_HOME`, run `cezar auth bootstrap` to create the first owner. The auth
    command also needs `CEZ_AUTH_REQUIRED=1` in its own environment:

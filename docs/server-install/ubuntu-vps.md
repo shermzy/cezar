@@ -130,7 +130,10 @@ site. For PowerShell, set `$env:CEZ_AUTH_REQUIRED='1'` before running the CLI.
 
 With `--external-proxy`, Cezar never edits the proxy. Keep its Basic Auth until
 an owner can sign in and an anonymous owner-only request returns 401, then
-remove the challenge yourself while preserving TLS.
+remove the challenge yourself while preserving TLS. The installer sets
+`CEZ_AUTH_TRUST_PROXY=1` when managed auth is enabled so login limits can use
+the real client address; configure your proxy to **overwrite** `X-Real-IP` with
+that address, and keep the Cezar listener reachable only through the proxy.
 
 ### Which `--bind-host`?
 
