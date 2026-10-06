@@ -134,11 +134,17 @@ export class AgentBrowser {
       stdout = execFileSync(this.bin, ['--session', this.session, ...args, '--json'], {
         encoding: 'utf8',
         // A hung browser must fail the spec, not the whole suite's wall clock.
-        timeout: 60_000,
+        timeout: 5_000,
         maxBuffer: 32 * 1024 * 1024,
       })
     } catch (cause) {
-      throw new Error(`cezar e2e: agent-browser ${args.join(' ')} failed`, { cause })
+      const timedOut = cause as NodeJS.ErrnoException & { stdout?: string }
+      // On Windows, the CLI can return a complete response while its browser
+      // child keeps stdout open. Treat only that complete response as success.
+      if (timedOut.code !== 'ETIMEDOUT' || !timedOut.stdout) {
+        throw new Error(`cezar e2e: agent-browser ${args.join(' ')} failed`, { cause })
+      }
+      stdout = timedOut.stdout
     }
     const parsed = JSON.parse(stdout) as { success: boolean; data?: unknown; error?: unknown }
     if (!parsed.success) {

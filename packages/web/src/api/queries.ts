@@ -58,6 +58,7 @@ import {
   getUiState,
   getWorkflows,
   getWorkspaceConfig,
+  getWorkspaceSpecialists,
   getWorkspaceUiState,
   getSkillsUpdate,
   getSelfUpdate,
@@ -386,6 +387,8 @@ export const workspaceQueryKeys = {
   /** Agent accounts via `GET /api/v1/workspace/agent-profiles` (spec 2026-07-29-agent-profiles).
    *  Workspace-led like the registry: an account describes the machine, not a repo. */
   agentProfiles: ['workspace', 'agent-profiles'] as const,
+  /** User-authored standby role definitions, shared by every registered project. */
+  specialists: ['workspace', 'specialists'] as const,
   /** One account's identity, keyed by its route id. A child of `agentProfiles` so removing an
    *  account drops any details cached for it in the same invalidation. */
   agentAccountDetails: (routeId: string) =>
@@ -1362,6 +1365,15 @@ export function useAgentProfiles() {
   return useQuery({
     queryKey: workspaceQueryKeys.agentProfiles,
     queryFn: ({ signal }) => getAgentProfiles({ signal }),
+  })
+}
+
+export function useWorkspaceSpecialists(enabled = true) {
+  return useQuery({
+    queryKey: workspaceQueryKeys.specialists,
+    queryFn: ({ signal }) => getWorkspaceSpecialists({ signal }),
+    enabled,
+    staleTime: 30_000,
   })
 }
 
