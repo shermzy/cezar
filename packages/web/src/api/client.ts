@@ -150,6 +150,7 @@ import type { Ok, OkJson } from '@open-mercato/cezar-api-client'
 import type { ClientResponse } from 'hono/client'
 import type { ResponseFormat } from 'hono/types'
 import type { AppType } from '@open-mercato/cezar/app-type'
+import { getAuthCsrfToken } from './csrf'
 
 /**
  * The cockpit's client for its own HTTP API.
@@ -389,7 +390,12 @@ async function unwrapValidated<R extends ClientResponse<unknown, number, Respons
  */
 async function fetchOrThrow(url: string, init?: RequestInit): Promise<Response> {
   try {
-    return await fetch(url, { ...init, credentials: 'include' })
+    const headers = new Headers(init?.headers)
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes((init?.method ?? 'GET').toUpperCase())) {
+      const token = getAuthCsrfToken()
+      if (token) headers.set('X-Cezar-CSRF', token)
+    }
+    return await fetch(url, { ...init, headers, credentials: 'include' })
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
     throw new ApiError(0, `cannot reach the cezar server (${url})`, { cause })

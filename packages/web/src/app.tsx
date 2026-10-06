@@ -6,6 +6,7 @@ import { GlobalEventsProvider } from './api/global-events'
 import { HostUsageProvider } from './api/host-usage'
 import { createQueryClient } from './api/query-client'
 import { AppShellContainer } from './components/app-shell-container'
+import { ManagedAccessGate } from './components/managed-access'
 import { AppearanceProvider } from './components/appearance-provider'
 import { LastLocationController } from './components/last-location-controller'
 import { ReferenceStatusRegistry } from './components/reference-status'
@@ -35,6 +36,7 @@ export function App() {
 
   return (
     <QueryClientProvider client={queryClient}>
+      <ManagedAccessGate>
       <GlobalEventsProvider>
         {/* The machine-telemetry store, one per app: the sidebar widget and the Settings card are
             two readers of the same sample and the same 60 s ring, and exactly one writer (root,
@@ -72,6 +74,7 @@ export function App() {
           </ThemeProvider>
         </HostUsageProvider>
       </GlobalEventsProvider>
+      </ManagedAccessGate>
     </QueryClientProvider>
   )
 }

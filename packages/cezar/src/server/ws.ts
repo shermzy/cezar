@@ -78,7 +78,7 @@ export interface TopicOptions {
  * foreign page on another local port are indistinguishable at the handshake: it
  * may subscribe ONLY to topics a publisher flagged `loopbackReadable`.
  */
-export type WsUpgradeVerdict = false | { trusted: boolean };
+export type WsUpgradeVerdict = false | { trusted: boolean; authUserId?: string };
 
 /** The minimal server surface `attach` needs — satisfied by the `http.Server`
  *  that `@hono/node-server`'s `serve()` returns. */
@@ -98,6 +98,7 @@ export interface SocketHub {
    *  its `trusted` flag decides which topics the connection may read. Boot-time
    *  wiring like `registerTopic`: attaching twice throws. */
   attach(server: UpgradeCapableServer, verifyUpgrade: (req: IncomingMessage) => WsUpgradeVerdict): void;
+  revokeUser(userId: string): void;
   /** Stop publishers, terminate clients, clear timers. Idempotent; also runs
    *  on the attached server's own `close`. */
   close(): void;
@@ -119,6 +120,7 @@ interface ClientState {
   /** The upgrade verdict's trust flag (see `WsUpgradeVerdict`). An untrusted
    *  connection may subscribe only to `loopbackReadable` topics. */
   trusted: boolean;
+  authUserId?: string;
 }
 
 export interface SocketHubOptions {
@@ -192,10 +194,10 @@ export function createSocketHub(options: SocketHubOptions = {}): SocketHub {
     clients.delete(ws);
   };
 
-  wss.on('connection', (ws: WebSocket, _req: IncomingMessage, trusted?: boolean) => {
+  wss.on('connection', (ws: WebSocket, _req: IncomingMessage, trusted?: boolean, authUserId?: string) => {
     // `trusted` is emitted by `attach` from the upgrade verdict; default false is
     // the safe read for any path that reaches here without one.
-    const client: ClientState = { alive: true, topics: new Set(), trusted: trusted === true };
+    const client: ClientState = { alive: true, topics: new Set(), trusted: trusted === true, ...(authUserId ? { authUserId } : {}) };
     clients.set(ws, client);
     ws.on('pong', () => {
       client.alive = true;
@@ -266,7 +268,7 @@ export function createSocketHub(options: SocketHubOptions = {}): SocketHub {
         }
         // Carry the verdict's trust flag onto the connection — `subscribe` reads
         // it to gate non-`loopbackReadable` topics.
-        wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req, verdict.trusted));
+        wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req, verdict.trusted, verdict.authUserId));
       });
       server.on('close', () => hub.close());
       heartbeat = setInterval(() => {
@@ -302,6 +304,14 @@ export function createSocketHub(options: SocketHubOptions = {}): SocketHub {
         ws.terminate();
       }
       wss.close();
+    },
+
+    revokeUser(userId) {
+      for (const [ws, client] of clients) {
+        if (client.authUserId !== userId) continue;
+        dropClient(ws);
+        ws.terminate();
+      }
     },
   };
 

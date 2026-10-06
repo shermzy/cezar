@@ -60,6 +60,7 @@ import type { QueuedMessage, RunRecord, RunStore, StepState } from '../runs/stor
 // takes byte-for-byte the path it took before this feature existed.
 import type { DispatchInput, DispatchIntent, DispatchReport, RunDispatch, SpecialistSnapshot } from '@open-mercato/cezar-contract';
 import { resolveCapabilities } from '../server/capabilities.ts';
+import { issueRunCapability } from '../server/internal-capabilities.ts';
 import { composeDispatchPrompt } from '../dispatch/prompts.ts';
 import {
   appendLedger,
@@ -1190,6 +1191,9 @@ export class RunManager {
       // is byte-for-byte as before.
       ...(apiUrl ? { CEZ_API_URL: apiUrl } : {}),
       ...(apiUrl && this.projectId ? { CEZ_PROJECT_ID: this.projectId } : {}),
+      ...(apiUrl && this.projectId && process.env.CEZ_AUTH_REQUIRED === '1'
+        ? { CEZ_INTERNAL_CAPABILITY: issueRunCapability(runId, this.projectId)! }
+        : {}),
       // The cockpit's OWN entrypoint, so an agent runs `node "$CEZ_BIN" task …` and never an older
       // `cez` that happens to be on its PATH without the command (observed on the first live run).
       ...(apiUrl && process.env.CEZ_BIN ? { CEZ_BIN: process.env.CEZ_BIN } : {}),

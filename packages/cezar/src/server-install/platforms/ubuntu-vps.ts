@@ -6,9 +6,9 @@ import { CANCEL, PreflightError, type InstallContext, type InstallStep, type Pla
 import { depCheckStep, generatePassword, owned, shared, shquote, StepAborted, StepCancelled, StepSkipped, sudoStep, verifyCommand } from '../steps.ts';
 
 /**
- * The `ubuntu-vps` strategy: stand up an authenticated, proxied cezar on a bare
- * Ubuntu/Debian VPS. cezar itself stays loopback-bound; nginx is the single
- * public surface (TLS + htpasswd identity) forwarding to 127.0.0.1:<port>.
+ * The `ubuntu-vps` strategy: stand up a proxied cezar on a bare Ubuntu/Debian
+ * VPS. The default nginx site uses TLS + htpasswd; managed Cezar auth can
+ * replace the Basic Auth challenge after the local API gate is verified.
  *
  * Phase 1 ships deps → nginx+htpasswd → identity-verify (and their `undo`s).
  * Phase 2 appends the optional SSL and autostart steps to `steps()`.
@@ -783,6 +783,7 @@ export function systemdUnit(
   execStart: string,
   bindHost?: string,
   instanceId?: string,
+  authRequired = process.env.CEZ_AUTH_REQUIRED === '1',
 ): string {
   const userLine = scope === 'system' ? `User=${userInfo().username}\n` : '';
   const installTarget = scope === 'system' ? 'multi-user.target' : 'default.target';
@@ -809,13 +810,20 @@ Type=simple
 ${userLine}WorkingDirectory=${repoRoot}
 Environment=CEZ_REMOTE=1
 ${instanceId ? `Environment=CEZ_INSTANCE_ID=${sysd(instanceId)}\n` : ''}Environment=PATH=${sysd(pathDirs.join(':'))}
-ExecStart=${sysd(execStart)} serve --no-open --port ${port}${sysd(bind)}
+${authRequired ? 'Environment=CEZ_AUTH_REQUIRED=1\n' : ''}ExecStart=${sysd(execStart)} serve --no-open --port ${port}${sysd(bind)}
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=${installTarget}
 `;
+}
+
+async function serviceAuthRequired(ctx: InstallContext, scope: 'user' | 'system', unit: string): Promise<boolean> {
+  if (process.env.CEZ_AUTH_REQUIRED === '1') return true;
+  if (ctx.dryRun) return false;
+  const result = await ctx.runner.capture('systemctl', [...(scope === 'user' ? ['--user'] : []), 'show', unit, '-p', 'Environment']);
+  return result.code === 0 && /(?:^|[\s=])CEZ_AUTH_REQUIRED=1(?:\s|$)/.test(result.stdout);
 }
 
 /** Our official npm package/alias — what `npx <this>` reinstalls the CLI as. */
@@ -956,6 +964,51 @@ async function readExecStart(ctx: InstallContext, scope: 'user' | 'system', unit
   return stdout;
 }
 
+async function managedAuthIsReady(ctx: InstallContext): Promise<boolean> {
+  try {
+    const base = `http://${upstreamHost(ctx)}:${ctx.state.primaryPort}/api/v1`;
+    const session = await curlResponse(ctx, [`${base}/auth/session`]);
+    const projects = await curlCode(ctx, [`${base}/projects`]);
+    const body = JSON.parse(session.body) as { authRequired?: unknown; authenticated?: unknown };
+    return session.code === '200' && body.authRequired === true && body.authenticated === false && projects === '401';
+  } catch {
+    return false;
+  }
+}
+
+async function cutoverNginxToManagedAuth(ctx: InstallContext): Promise<void> {
+  const path = vhostAvailable(ctx);
+  const current = await ctx.runner.capture('cat', [path]);
+  if (current.code !== 0 || !current.stdout.includes('# Managed by cezar server-install')) {
+    ctx.ui.warn(`Could not verify the managed nginx site at ${path}; leaving its Basic Auth challenge in place.`);
+    return;
+  }
+  const hasAuthBasic = /^\s*auth_basic\s/m.test(current.stdout);
+  const hasAuthFile = /^\s*auth_basic_user_file\s/m.test(current.stdout);
+  if (!hasAuthBasic && !hasAuthFile) return;
+  if (!hasAuthBasic || !hasAuthFile) {
+    ctx.ui.warn(`The nginx Basic Auth directives in ${path} are incomplete; leaving the site unchanged.`);
+    return;
+  }
+  if (!await managedAuthIsReady(ctx)) {
+    ctx.ui.warn('Managed login is not ready yet; nginx Basic Auth stays in place. Bootstrap or repair the owner locally, then rerun `cezar server-install --reconfigure autostart`.');
+    return;
+  }
+
+  const backup = `${path}.cezar-auth-rollback`;
+  const sedProgram = '/^[[:space:]]*auth_basic(_user_file)?[[:space:]]/d';
+  const command =
+    `cp -p ${shquote(path)} ${shquote(backup)} && sed -i -E ${shquote(sedProgram)} ${shquote(path)} && ` +
+    `if nginx -t && systemctl reload nginx; then rm -f ${shquote(backup)}; ` +
+    `else cp -p ${shquote(backup)} ${shquote(path)} && nginx -t && systemctl reload nginx && rm -f ${shquote(backup)}; exit 1; fi`;
+  await sudoStep(ctx, {
+    description: 'Remove nginx Basic Auth after verifying Cezar logins; preserve TLS and roll back the site if nginx rejects the change.',
+    command,
+    verify: async (c) => !(await verifyCommand(c, 'grep', ['-Eq', '^[[:space:]]*auth_basic(_user_file)?[[:space:]]', path])),
+  });
+  ctx.ui.success('Managed Cezar login was verified; nginx Basic Auth is removed and TLS remains enabled.');
+}
+
 const autostartStep: InstallStep = {
   id: 'autostart',
   // Required: after install the cockpit must actually be serving, so cezar runs
@@ -975,6 +1028,7 @@ const autostartStep: InstallStep = {
     const userBus = ctx.dryRun ? true : (await ctx.runner.capture('systemctl', ['--user', 'show-environment'])).code === 0;
 
     if (userBus) {
+      const authRequired = await serviceAuthRequired(ctx, 'user', UNIT_NAME);
       const unitPath = join(homedir(), '.config', 'systemd', 'user', UNIT_NAME);
       if (ctx.dryRun) {
         ctx.ui.info(`DRY RUN — would write ${unitPath} and enable it (systemctl --user enable --now cezar).`);
@@ -982,7 +1036,7 @@ const autostartStep: InstallStep = {
         mkdirSync(join(homedir(), '.config', 'systemd', 'user'), { recursive: true });
         writeFileSync(
           unitPath,
-          systemdUnit(ctx.repoRoot, ctx.state.primaryPort, 'user', execStart, ctx.state.bindHost, ctx.state.instanceId),
+          systemdUnit(ctx.repoRoot, ctx.state.primaryPort, 'user', execStart, ctx.state.bindHost, ctx.state.instanceId, authRequired),
           'utf8',
         );
         await ctx.runner.interactive('systemctl', ['--user', 'daemon-reload']);
@@ -1008,20 +1062,23 @@ const autostartStep: InstallStep = {
           ),
       });
       await confirmCezarRunning(ctx, 'systemctl --user status cezar', 'journalctl --user -u cezar -n 50 --no-pager');
+      if (authRequired && !ctx.state.externalProxy) await cutoverNginxToManagedAuth(ctx);
       const artifacts: StepArtifact[] = [owned('service', { name: UNIT_NAME, scope: 'user', path: unitPath })];
       if (!lingerWasOn) artifacts.push(owned('linger', { name: osUser }));
       return { artifacts };
     }
 
     // System unit fallback.
+    const authRequired = await serviceAuthRequired(ctx, 'system', UNIT_NAME);
     await writeFileStep(ctx, {
       description: 'Install the cezar systemd unit, start it now, and enable it at boot.',
       path: `/etc/systemd/system/${UNIT_NAME}`,
-      content: systemdUnit(ctx.repoRoot, ctx.state.primaryPort, 'system', execStart, ctx.state.bindHost, ctx.state.instanceId),
+      content: systemdUnit(ctx.repoRoot, ctx.state.primaryPort, 'system', execStart, ctx.state.bindHost, ctx.state.instanceId, authRequired),
       extra: `systemctl daemon-reload && systemctl enable --now ${UNIT_NAME}`,
       verify: (c) => verifyCommand(c, 'systemctl', ['is-enabled', UNIT_NAME]),
     });
     await confirmCezarRunning(ctx, 'sudo systemctl status cezar', 'sudo journalctl -u cezar -n 50 --no-pager');
+    if (authRequired && !ctx.state.externalProxy) await cutoverNginxToManagedAuth(ctx);
     return { artifacts: [owned('service', { name: UNIT_NAME, scope: 'system', path: `/etc/systemd/system/${UNIT_NAME}` })] };
   },
   async undo(ctx, created) {
@@ -1060,8 +1117,7 @@ const autostartStep: InstallStep = {
 /**
  * `--external-proxy` verification: confirm the cockpit is listening on the
  * interface the operator's proxy will dial, then hand them the routing snippet.
- * cezar ships no auth of its own, so this is also where we say — unmissably —
- * that the front they own has to enforce it.
+ * Without a ready managed-auth store, the external front must enforce auth.
  */
 async function verifyBehindExternalProxy(ctx: InstallContext): Promise<{ artifacts: StepArtifact[] }> {
   const port = ctx.state.primaryPort;
@@ -1089,10 +1145,15 @@ async function verifyBehindExternalProxy(ctx: InstallContext): Promise<{ artifac
   }
 
   ctx.ui.success(`Cockpit is up and listening on ${target}.`);
-  ctx.ui.warn(
-    'cezar has NO built-in authentication in this mode — your reverse proxy MUST enforce it. ' +
-      'Anyone who can reach ' + target + ' can run agents on this box.',
-  );
+  const managedAuth = await managedAuthIsReady(ctx);
+  if (managedAuth) {
+    ctx.ui.success('Managed Cezar login is active. You can route directly to the cockpit without proxy Basic Auth.');
+  } else {
+    ctx.ui.warn(
+      'Managed Cezar login is not ready — your reverse proxy MUST enforce authentication. ' +
+        'Anyone who can reach ' + target + ' can run agents on this box.',
+    );
+  }
   ctx.ui.message(
     [
       `Point your existing proxy at ${target} for ${domain}. For Dokploy / Traefik,`,
@@ -1103,17 +1164,19 @@ async function verifyBehindExternalProxy(ctx: InstallContext): Promise<{ artifac
       `      cezar:`,
       `        rule: "Host(\`${domain}\`)"`,
       `        entryPoints: [websecure]`,
-      `        middlewares: [cezar-auth]`,
+      ...(managedAuth ? [] : [`        middlewares: [cezar-auth]`]),
       `        service: cezar`,
       `        tls: { certResolver: letsencrypt }`,
       `    services:`,
       `      cezar:`,
       `        loadBalancer:`,
       `          servers: [{ url: "${target}" }]`,
-      `    middlewares:`,
-      `      cezar-auth:`,
-      `        basicAuth:`,
-      `          users: ["USER:$$apr1$$...."]   # htpasswd -nb user pass (double every $)`,
+      ...(managedAuth ? [] : [
+        `    middlewares:`,
+        `      cezar-auth:`,
+        `        basicAuth:`,
+        `          users: ["USER:$$apr1$$...."]   # htpasswd -nb user pass (double every $)`,
+      ]),
       ``,
       `Keep ${host}:${port} off the public internet (ufw / cloud firewall) — the proxy`,
       `should be the only thing that can reach it.`,
