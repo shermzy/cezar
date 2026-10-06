@@ -44,6 +44,7 @@ import {
 } from '@open-mercato/cezar-contract';
 import type { AgentEvent, ContentBlock } from '../core/agent-runner.ts';
 import { discoverSkills, type Skill } from '../skills.ts';
+import { skillCatalogPart } from '../skill-catalog.ts';
 import { automationsReachable } from '../automations/builtin-skill.ts';
 import { AUTOMATIONS_PROMPT } from '../automations/prompts.ts';
 import { materializeSkillDir } from '../skills-remote.ts';
@@ -3871,6 +3872,7 @@ export class RunManager {
         systemPrompt: composeSystemPrompt(
           dispatchPromptPart(state.dispatchPrompt, record?.systemPrompt),
           state.automationsPrompt,
+          skillCatalogPart(state.skills),
           record?.systemPrompt,
           generateFollowups ? HANDOFF_INSTRUCTIONS : HANDOFF_ONLY_INSTRUCTIONS,
         ),
@@ -4704,6 +4706,7 @@ export class RunManager {
             systemPrompt,
             dispatchPromptPart(state.dispatchPrompt, extraSystemPrompt),
             state.automationsPrompt,
+            skillCatalogPart(skills, step.skill),
             extraSystemPrompt,
             followupsEnabled() && input.generateFollowups !== false
               ? HANDOFF_INSTRUCTIONS
