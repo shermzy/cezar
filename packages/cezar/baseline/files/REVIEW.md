@@ -22,7 +22,7 @@ How an agent (or a person) reviews a pull request in this repository.
 ## Author and approver
 
 The agent that wrote a change does not approve or merge it. A human does, after a separate reviewer has looked.
-The `.claude/hooks/guard-merge.mjs` hook blocks an agent from running `gh pr merge` or `gh pr review --approve`.
+The `.claude/hooks/guard-merge.mjs` hook catches common direct and nested `gh pr merge` and `gh pr review --approve` calls. It is a best-effort local brake; enforce the rule with GitHub permissions and required reviews where those protections are configured.
 
 A separate reviewer can be a person or an agent that is not the author: cezar's built-in `pr-review` workflow
 reviews a pull request, posts one comment sorted into Important and Nit, and has no way to approve or merge.

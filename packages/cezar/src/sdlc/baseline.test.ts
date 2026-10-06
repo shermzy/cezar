@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -122,6 +122,15 @@ describe('planBaseline / applyBaseline', () => {
     expect((await planBaseline(root, bundle(1, { 'A.md': 'alpha' })))[0]?.action).toBe('skip-current');
   });
 
+  it('does not claim or later update an identical file that cezar did not create', async () => {
+    const root = repo({ 'A.md': 'alpha' });
+    await applyBaseline(root, bundle(1, { 'A.md': 'alpha' }));
+    expect(JSON.parse(read(root, '.claude/cezar-baseline.json')).files).not.toHaveProperty('A.md');
+    expect(await planBaseline(root, bundle(2, { 'A.md': 'updated' }))).toEqual([{ path: 'A.md', action: 'skip-diverged' }]);
+    await applyBaseline(root, bundle(2, { 'A.md': 'updated' }));
+    expect(read(root, 'A.md')).toBe('alpha');
+  });
+
   it('updates a file cezar wrote and nobody edited when the baseline moves on, and leaves an edited one', async () => {
     const root = repo();
     await applyBaseline(root, bundle(1, { 'A.md': 'a1', 'B.md': 'b1' }));
@@ -135,6 +144,22 @@ describe('planBaseline / applyBaseline', () => {
     expect(read(root, 'A.md')).toBe('a2');
     expect(read(root, 'B.md')).toBe('b1 edited by a person');
     expect(JSON.parse(read(root, '.claude/cezar-baseline.json')).version).toBe(2);
+  });
+
+  it.skipIf(process.platform === 'win32')('preserves existing file and manifest modes during updates', async () => {
+    const root = repo();
+    const file = join(root, 'script.sh');
+    const manifest = join(root, '.claude/cezar-baseline.json');
+    await applyBaseline(root, bundle(1, { 'script.sh': 'echo one\n' }));
+    chmodSync(file, 0o750);
+    chmodSync(manifest, 0o600);
+
+    await applyBaseline(root, bundle(2, { 'script.sh': 'echo two\n' }));
+
+    expect(read(root, 'script.sh')).toBe('echo two\n');
+    expect(JSON.parse(read(root, '.claude/cezar-baseline.json')).version).toBe(2);
+    expect(statSync(file).mode & 0o777).toBe(0o750);
+    expect(statSync(manifest).mode & 0o777).toBe(0o600);
   });
 
   it('fills {{test}} and {{lint}} from package.json and reports the ones it could not fill', async () => {
@@ -154,6 +179,22 @@ describe('planBaseline / applyBaseline', () => {
     const evil: Baseline = { version: 1, source: 'override', files: [{ path: '../outside.md', content: 'x' }] };
     await expect(applyBaseline(root, evil)).rejects.toThrow(/outside/i);
     expect(existsSync(join(root, '..', 'outside.md'))).toBe(false);
+  });
+
+  it('refuses a linked destination directory before writing any baseline file', async () => {
+    const root = repo();
+    const outside = tmp();
+    symlinkSync(outside, join(root, 'linked'), 'junction');
+    const b = bundle(1, { 'A.md': 'safe', 'linked/B.md': 'escape' });
+    await expect(applyBaseline(root, b)).rejects.toThrow(/symlink|outside|unsafe/i);
+    expect(existsSync(join(root, 'A.md'))).toBe(false);
+    expect(existsSync(join(outside, 'B.md'))).toBe(false);
+  });
+
+  it('does not replace a pre-existing corrupt manifest', async () => {
+    const root = repo({ '.claude/cezar-baseline.json': '{ personal state' });
+    await applyBaseline(root, bundle(1, { 'A.md': 'alpha' }));
+    expect(read(root, '.claude/cezar-baseline.json')).toBe('{ personal state');
   });
 
   it('treats a corrupt manifest as no manifest rather than failing', async () => {
@@ -203,6 +244,19 @@ describe('line endings never decide whether a file was edited', () => {
 });
 
 describe('baselineAudit', () => {
+  it('does not follow a linked baseline file outside the repository', async () => {
+    const root = repo({ '.claude/cezar-baseline.json': JSON.stringify({ version: 1, files: { 'linked/A.md': sha('outside') } }) });
+    const outside = tmp();
+    writeFileSync(join(outside, 'A.md'), 'outside');
+    symlinkSync(outside, join(root, 'linked'), 'junction');
+    expect((await baselineAudit(root, bundle(1, { 'linked/A.md': 'outside' }))).files[0]?.state).toBe('diverged');
+  });
+
+  it('does not read baseline targets beyond the file limit', async () => {
+    const large = 'x'.repeat(65 * 1024);
+    const root = repo({ 'A.md': large, '.claude/cezar-baseline.json': JSON.stringify({ version: 1, files: { 'A.md': sha(large) } }) });
+    expect((await baselineAudit(root, bundle(1, { 'A.md': 'alpha' }))).files[0]?.state).toBe('diverged');
+  });
   it('walks none → current → diverged → outdated', async () => {
     const root = repo();
     const v1 = bundle(1, { 'A.md': 'alpha' });

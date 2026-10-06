@@ -7,10 +7,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { loadBaseline } from './baseline.ts';
 
 /**
- * The merge/approve guard that ships in baseline v2 (spec 2026-10-06-ai-native-sdlc-review-loop),
- * run as the real child process Claude Code would start. The point of the hook is that an agent
- * which wrote a PR cannot merge or approve it, so the cases below are every way an agent could
- * spell that — and, as important, the ways it legitimately mentions those words.
+ * The best-effort merge/approve guard shipped in the SDLC baseline
+ * (spec 2026-10-06-ai-native-sdlc-review-loop), run as the child process Claude Code would start.
+ * These cases cover common direct and nested GitHub CLI calls and harmless quoted mentions;
+ * GitHub-side permissions remain the enforcement boundary.
  */
 const baselineDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'baseline');
 const script = join(baselineDir, 'files', 'claude', 'hooks', 'guard-merge.mjs');
@@ -26,7 +26,7 @@ function run(stdin: string) {
 }
 const bash = (command: string) => JSON.stringify({ tool_name: 'Bash', tool_input: { command } });
 
-describe('guard-merge blocks every spelling of merge and approve', () => {
+describe('guard-merge blocks covered merge and approve commands', () => {
   it.each([
     'gh pr merge 12 --squash',
     'gh pr merge',
@@ -46,6 +46,25 @@ describe('guard-merge blocks every spelling of merge and approve', () => {
     'gh api graphql -f query=\'mutation { mergePullRequest(input: {pullRequestId: "x"}) { clientMutationId } }\'',
     'gh api graphql -f query=\'mutation { enablePullRequestAutoMerge(input: {pullRequestId: "x"}) { clientMutationId } }\'',
     'gh api graphql -f query=\'mutation { addPullRequestReview(input: {pullRequestId: "x", event: APPROVE}) { clientMutationId } }\'',
+    "bash -c 'gh pr merge 5'",
+    'env -i gh pr merge 5',
+    'gh pr comment 5 --body "$(gh pr merge 5)"',
+    'gh.exe pr merge 5',
+    'echo `gh pr merge 5`',
+    'echo "`gh pr merge 5`"',
+    'cmd /c gh.exe pr merge 5',
+    'pwsh -Command "gh.exe pr merge 5"',
+    "pwsh -Com 'gh pr merge 5'",
+    "pwsh -CommandWithArgs 'gh pr merge 5'",
+    "pwsh -cwa 'gh pr merge 5'",
+    "env -S 'gh pr merge 5'",
+    "env --split-string='gh pr merge 5'",
+    '/usr/bin/env gh pr merge 5',
+    'nice -n 0 gh pr merge 5',
+    'sudo -u root gh pr merge 5',
+    'time -p gh pr merge 5',
+    'pwsh -EncodedCommand opaque',
+    'powershell.exe -enc opaque',
   ])('blocks: %s', (command) => {
     const r = run(bash(command));
     expect(r.status).toBe(2);
@@ -54,7 +73,17 @@ describe('guard-merge blocks every spelling of merge and approve', () => {
   });
 });
 
-describe('guard-merge lets everything else through', () => {
+describe('guard-merge fails closed when a wrapper command is opaque', () => {
+  it.each([
+    'env --unknown gh pr view 5',
+    'nice --unknown gh pr view 5',
+    'sudo --unknown gh pr view 5',
+  ])('blocks unsupported wrapper options: %s', (command) => {
+    expect(run(bash(command)).status).toBe(2);
+  });
+});
+
+describe('guard-merge allows covered non-merge commands', () => {
   it.each([
     'gh pr view 5',
     'gh pr diff 5',
@@ -70,6 +99,12 @@ describe('guard-merge lets everything else through', () => {
     'git commit -m "never run gh pr review --approve from an agent"',
     'gh pr comment 5 --body "Do not gh pr merge --admin; wait for the human."',
     'echo "gh pr merge 5"',
+    "echo '`gh pr merge 5`'",
+    "echo 'env -S gh pr merge 5'",
+    'git commit -m "mention pwsh -EncodedCommand without running it"',
+    '/usr/bin/env gh pr view 5',
+    'nice -n 0 gh pr view 5',
+    "pwsh -Com 'gh pr view 5'",
     'ls -la',
     'npm test',
   ])('allows: %s', (command) => {

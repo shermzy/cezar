@@ -1,6 +1,7 @@
-import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import { constants } from 'node:fs';
+import { lstat, mkdir, open, readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import type { SdlcBaseline, SdlcBaselineAction } from '@open-mercato/cezar-contract';
@@ -101,21 +102,87 @@ export async function loadBaseline(options: LoadOptions = {}): Promise<Baseline>
   }
 }
 
-async function readOptional(path: string): Promise<string | null> {
+type InspectedFile = { kind: 'missing' | 'unreadable' | 'unsafe' } | { kind: 'readable'; content: string };
+const within = (root: string, path: string) => path === root || path.startsWith(root + sep);
+
+/** Baseline reads never follow links or consume more than one small file's budget. */
+async function inspectFile(root: string, rel: string): Promise<InspectedFile> {
+  if (rel !== MANIFEST_PATH && !safeRelativePath(rel)) return { kind: 'unsafe' };
+  const parts = rel.split('/');
+  let path = root;
+  for (const [index, part] of parts.entries()) {
+    path = join(path, part);
+    let entry;
+    try {
+      entry = await lstat(path);
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code === 'ENOENT' ? { kind: 'missing' } : { kind: 'unreadable' };
+    }
+    if (entry.isSymbolicLink()) return { kind: 'unsafe' };
+    if (index < parts.length - 1 && !entry.isDirectory()) return { kind: 'unreadable' };
+    if (index === parts.length - 1 && (!entry.isFile() || entry.size > MAX_FILE_BYTES)) return { kind: 'unreadable' };
+  }
   try {
-    return await readFile(path, 'utf8');
+    const actual = await realpath(path);
+    if (!within(root, actual)) return { kind: 'unsafe' };
+    const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    try {
+      // Re-check after opening, so a replaced final symlink is not read.
+      if ((await lstat(path)).isSymbolicLink()) return { kind: 'unsafe' };
+      const data = Buffer.alloc(MAX_FILE_BYTES + 1);
+      let used = 0;
+      while (used < data.length) {
+        const { bytesRead } = await handle.read(data, used, data.length - used, used);
+        if (bytesRead === 0) break;
+        used += bytesRead;
+      }
+      return used > MAX_FILE_BYTES ? { kind: 'unreadable' } : { kind: 'readable', content: data.toString('utf8', 0, used) };
+    } finally {
+      await handle.close();
+    }
   } catch {
-    return null;
+    return { kind: 'unreadable' };
   }
 }
 
-async function readManifest(root: string): Promise<RepoManifest | null> {
-  const raw = await readOptional(join(root, MANIFEST_PATH));
-  if (raw === null) return null;
+/** Replace a known Cezar-owned file by renaming a new entry, never by following its inode. */
+async function replaceContained(root: string, rel: string, content: string, expected: string): Promise<void> {
+  const target = resolve(root, rel);
+  const parent = dirname(target);
+  if (!within(root, await realpath(parent))) throw new Error(`refusing to write outside the repository: ${rel}`);
+  const temporary = join(parent, `.cezar-${randomUUID()}.tmp`);
+  const handle = await open(temporary, 'wx', 0o600);
   try {
-    return repoManifestSchema.parse(JSON.parse(raw));
+    try {
+      await handle.writeFile(content);
+      if (!within(root, await realpath(temporary))) throw new Error(`refusing to write outside the repository: ${rel}`);
+      const current = await inspectFile(root, rel);
+      if (current.kind !== 'readable' || current.content !== expected) throw new Error(`baseline target changed before write: ${rel}`);
+      const entry = await lstat(target);
+      if (!entry.isFile() || entry.isSymbolicLink()) throw new Error(`baseline target changed before write: ${rel}`);
+      await handle.chmod(entry.mode & 0o777);
+    } finally {
+      await handle.close();
+    }
+    await rename(temporary, target);
+  } finally {
+    await unlink(temporary).catch(() => undefined);
+  }
+}
+
+interface ManifestRead {
+  value: RepoManifest | null;
+  /** An existing but invalid manifest belongs to the repository and must not be replaced. */
+  existing: boolean;
+}
+
+async function readManifest(root: string): Promise<ManifestRead> {
+  const inspected = await inspectFile(root, MANIFEST_PATH);
+  if (inspected.kind !== 'readable') return { value: null, existing: inspected.kind !== 'missing' };
+  try {
+    return { value: repoManifestSchema.parse(JSON.parse(inspected.content)), existing: true };
   } catch {
-    return null; // corrupt: behave as if cezar had never written here
+    return { value: null, existing: true };
   }
 }
 
@@ -123,7 +190,8 @@ async function readManifest(root: string): Promise<RepoManifest | null> {
 async function render(root: string, file: BaselineFile): Promise<{ content: string; unfilled: boolean }> {
   let scripts: Record<string, unknown> = {};
   try {
-    const pkg: unknown = JSON.parse((await readOptional(join(root, 'package.json'))) ?? '');
+    const packageFile = await inspectFile(root, 'package.json');
+    const pkg: unknown = JSON.parse(packageFile.kind === 'readable' ? packageFile.content : '');
     if (pkg && typeof pkg === 'object' && 'scripts' in pkg && pkg.scripts && typeof pkg.scripts === 'object') {
       scripts = pkg.scripts as Record<string, unknown>;
     }
@@ -155,16 +223,17 @@ interface PlannedFile {
 }
 
 async function plan(root: string, baseline: Baseline): Promise<PlannedFile[]> {
-  const manifest = await readManifest(root);
+  const manifest = (await readManifest(root)).value;
   const planned: PlannedFile[] = [];
   for (const file of baseline.files) {
     const { content, unfilled } = await render(root, file);
-    const onDisk = await readOptional(join(root, file.path));
+    const onDisk = await inspectFile(root, file.path);
     const tracked = manifest?.files[file.path];
     let action: SdlcBaselineAction;
-    if (onDisk === null) action = 'create';
-    else if (sha256(onDisk) === sha256(content)) action = 'skip-current';
-    else if (tracked !== undefined && sha256(onDisk) === tracked) action = 'update';
+    if (onDisk.kind === 'missing') action = 'create';
+    else if (onDisk.kind !== 'readable') action = 'skip-diverged';
+    else if (sha256(onDisk.content) === sha256(content)) action = 'skip-current';
+    else if (tracked !== undefined && sha256(onDisk.content) === tracked) action = 'update';
     else action = 'skip-diverged';
     planned.push({ path: file.path, action, content, unfilled });
   }
@@ -173,7 +242,7 @@ async function plan(root: string, baseline: Baseline): Promise<PlannedFile[]> {
 
 /** What `apply` would do, writing nothing. */
 export async function planBaseline(root: string, baseline: Baseline): Promise<Array<{ path: string; action: SdlcBaselineAction }>> {
-  return (await plan(root, baseline)).map(({ path, action }) => ({ path, action }));
+  return (await plan(await realpath(root), baseline)).map(({ path, action }) => ({ path, action }));
 }
 
 export interface ApplyResult {
@@ -185,12 +254,14 @@ export interface ApplyResult {
 
 /** Write what the plan says to create or update, then record what cezar now owns. Idempotent. */
 export async function applyBaseline(root: string, baseline: Baseline): Promise<ApplyResult> {
-  const absRoot = resolve(root);
+  const absRoot = await realpath(root);
   // Check every destination before writing any, so a bad bundle cannot leave a half-applied repo.
   for (const file of baseline.files) {
     const rel = relative(absRoot, resolve(absRoot, file.path));
     if (rel.startsWith('..') || isAbsolute(rel)) throw new Error(`refusing to write outside the repository: ${file.path}`);
+    if ((await inspectFile(absRoot, file.path)).kind === 'unsafe') throw new Error(`refusing symlink or unsafe baseline path: ${file.path}`);
   }
+  if ((await inspectFile(absRoot, MANIFEST_PATH)).kind === 'unsafe') throw new Error(`refusing symlink or unsafe baseline path: ${MANIFEST_PATH}`);
   const planned = await plan(absRoot, baseline);
   const previous = await readManifest(absRoot);
   const hashes: Record<string, string> = {};
@@ -200,38 +271,54 @@ export async function applyBaseline(root: string, baseline: Baseline): Promise<A
     if (file.action === 'create' || file.action === 'update') {
       const target = resolve(absRoot, file.path);
       await mkdir(dirname(target), { recursive: true });
-      await writeFile(target, file.content);
+      const beforeWrite = await inspectFile(absRoot, file.path);
+      if ((file.action === 'create' && beforeWrite.kind !== 'missing') ||
+          (file.action === 'update' && (beforeWrite.kind !== 'readable' || sha256(beforeWrite.content) !== previous.value?.files[file.path]))) {
+        throw new Error(`baseline target changed before write: ${file.path}`);
+      }
+      if (file.action === 'create') {
+        if (!within(absRoot, await realpath(dirname(target)))) throw new Error(`refusing to write outside the repository: ${file.path}`);
+        await writeFile(target, file.content, { flag: 'wx' });
+      } else {
+        await replaceContained(absRoot, file.path, file.content, beforeWrite.kind === 'readable' ? beforeWrite.content : '');
+      }
       result.written.push(file.path);
       if (file.unfilled) result.unfilled.push(file.path);
       hashes[file.path] = sha256(file.content);
     } else {
       result.skipped.push({ path: file.path, action: file.action });
-      if (file.action === 'skip-current') hashes[file.path] = sha256(file.content);
-      else if (previous?.files[file.path] !== undefined) hashes[file.path] = previous.files[file.path] as string;
+      if (previous.value?.files[file.path] !== undefined) hashes[file.path] = previous.value.files[file.path] as string;
     }
   }
 
   const sorted = Object.fromEntries(Object.entries(hashes).sort(([a], [b]) => a.localeCompare(b)));
   const manifest = `${JSON.stringify({ version: baseline.version, files: sorted }, null, 2)}\n`;
   const manifestPath = join(absRoot, MANIFEST_PATH);
-  if ((await readOptional(manifestPath)) !== manifest) {
+  const existingManifest = await inspectFile(absRoot, MANIFEST_PATH);
+  if ((!previous.existing || previous.value !== null) && (existingManifest.kind === 'missing' || (existingManifest.kind === 'readable' && existingManifest.content !== manifest))) {
     await mkdir(dirname(manifestPath), { recursive: true });
-    await writeFile(manifestPath, manifest);
+    if (existingManifest.kind === 'missing') {
+      if (!within(absRoot, await realpath(dirname(manifestPath)))) throw new Error(`refusing to write outside the repository: ${MANIFEST_PATH}`);
+      await writeFile(manifestPath, manifest, { flag: 'wx' });
+    } else if (existingManifest.kind === 'readable') {
+      await replaceContained(absRoot, MANIFEST_PATH, manifest, existingManifest.content);
+    }
   }
   return result;
 }
 
 /** Where a repository stands against `baseline`, for the audit matrix. */
 export async function baselineAudit(root: string, baseline: Baseline): Promise<SdlcBaseline> {
-  const manifest = await readManifest(root);
+  const absRoot = await realpath(root);
+  const manifest = (await readManifest(absRoot)).value;
   if (!manifest) return { state: 'none', files: [] };
   const files: SdlcBaseline['files'] = [];
   for (const file of baseline.files) {
-    const onDisk = await readOptional(join(root, file.path));
+    const onDisk = await inspectFile(absRoot, file.path);
     const tracked = manifest.files[file.path];
     files.push({
       path: file.path,
-      state: onDisk === null ? 'missing' : tracked !== undefined && sha256(onDisk) === tracked ? 'untouched' : 'diverged',
+      state: onDisk.kind === 'missing' ? 'missing' : onDisk.kind === 'readable' && tracked !== undefined && sha256(onDisk.content) === tracked ? 'untouched' : 'diverged',
     });
   }
   const state = manifest.version < baseline.version ? 'outdated' : files.some((f) => f.state !== 'untouched') ? 'diverged' : 'current';
