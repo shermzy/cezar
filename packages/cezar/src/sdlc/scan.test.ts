@@ -156,6 +156,36 @@ describe('scanProject: plays', () => {
     expect((await scores(repo({ '.github/workflows/review.yml': wf })))['agent-review']).toBe('partial');
   });
 
+  it('agent-review: an enabled cezar pr-review automation counts in place of a CI action; a paused or unrelated one does not', async () => {
+    const auto = (enabled: boolean, workflow: string) =>
+      JSON.stringify({ version: 1, automations: [{ id: 'a', name: 'Review', enabled, kind: 'github', task: { prompt: 'x', workflow } }] });
+    const withAuto = (body: string) => ({ 'REVIEW.md': '# r', '.ai/cezar/automations.json': body });
+    const on = await scanProject(repo(withAuto(auto(true, 'pr-review'))));
+    expect(on.results.find((r) => r.play === 'agent-review')).toMatchObject({ score: 'present' });
+    expect(on.results.find((r) => r.play === 'agent-review')?.evidence).toContain('.ai/cezar/automations.json');
+    const paused = await scanProject(repo(withAuto(auto(false, 'pr-review'))));
+    expect(paused.results.find((r) => r.play === 'agent-review')).toMatchObject({ score: 'partial' });
+    expect(paused.results.find((r) => r.play === 'agent-review')?.note).toMatch(/enable|paused/i);
+    expect((await scores(repo(withAuto(auto(true, 'quick-task')))))['agent-review']).toBe('partial');
+    // The automation alone, without REVIEW.md, is half the play.
+    expect((await scores(repo({ '.ai/cezar/automations.json': auto(true, 'pr-review') })))['agent-review']).toBe('partial');
+  });
+
+  it('agent-review: a corrupt or hostile automations.json never throws and falls back to the workflow check', async () => {
+    expect((await scores(repo({ 'REVIEW.md': '# r', '.ai/cezar/automations.json': '{ nope' })))['agent-review']).toBe('partial');
+    expect((await scores(repo({ 'REVIEW.md': '# r', '.ai/cezar/automations.json': JSON.stringify({ automations: 'x' }) })))['agent-review']).toBe('partial');
+    expect((await scores(repo({ 'REVIEW.md': '# r', '.ai/cezar/automations.json': JSON.stringify({ automations: [null, 3, { task: null }] }) })))['agent-review']).toBe('partial');
+    const wf = 'jobs:\n  r:\n    steps:\n      - uses: anthropics/claude-code-action@v1';
+    expect((await scores(repo({ 'REVIEW.md': '# r', '.ai/cezar/automations.json': '{ nope', '.github/workflows/review.yml': wf })))['agent-review']).toBe('present');
+  });
+
+  it('approval-gates: a Bash hook that blocks merge or approve counts as a gate', async () => {
+    const guard = settings({ PreToolUse: hook('Bash', 'node "$CLAUDE_PROJECT_DIR/.claude/hooks/guard-merge.mjs"') });
+    expect((await scores(repo({ '.claude/settings.json': guard })))['approval-gates']).toBe('present');
+    const approve = settings({ PreToolUse: hook('Bash(gh pr review*)', 'node block-approve.mjs') });
+    expect((await scores(repo({ '.claude/settings.json': approve })))['approval-gates']).toBe('present');
+  });
+
   it('approval-gates: a PreToolUse hook on a push/deploy/secret pattern is Present, other hooks Partial', async () => {
     const gate = settings({ PreToolUse: hook('Bash(git push*)', 'node block-push.mjs') });
     expect((await scores(repo({ '.claude/settings.json': gate })))['approval-gates']).toBe('present');

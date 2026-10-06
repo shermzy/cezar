@@ -164,6 +164,44 @@ describe('planBaseline / applyBaseline', () => {
   });
 });
 
+describe('line endings never decide whether a file was edited', () => {
+  // A baseline checked out on Windows is CRLF, one built on Linux is LF, and git rewrites a repo's
+  // own files either way. None of that is an edit by a person.
+  it('treats a CRLF bundle and an LF bundle as the same content', async () => {
+    const root = repo();
+    await applyBaseline(root, bundle(1, { 'A.md': 'one\ntwo\n' }));
+    expect(await planBaseline(root, bundle(1, { 'A.md': 'one\r\ntwo\r\n' }))).toEqual([{ path: 'A.md', action: 'skip-current' }]);
+  });
+
+  it('keeps a file cezar wrote "untouched" after git converts it to CRLF', async () => {
+    const root = repo();
+    const b = bundle(1, { 'A.md': 'one\ntwo\n' });
+    await applyBaseline(root, b);
+    writeFileSync(join(root, 'A.md'), 'one\r\ntwo\r\n');
+    expect((await baselineAudit(root, b)).files[0]?.state).toBe('untouched');
+    expect((await baselineAudit(root, b)).state).toBe('current');
+  });
+
+  it('still updates an untouched CRLF file when the baseline moves on, and still sees a real edit', async () => {
+    const root = repo();
+    await applyBaseline(root, bundle(1, { 'A.md': 'a1\n', 'B.md': 'b1\n' }));
+    writeFileSync(join(root, 'A.md'), 'a1\r\n');
+    writeFileSync(join(root, 'B.md'), 'b1 edited\r\n');
+    expect(await planBaseline(root, bundle(2, { 'A.md': 'a2\n', 'B.md': 'b2\n' }))).toEqual([
+      { path: 'A.md', action: 'update' },
+      { path: 'B.md', action: 'skip-diverged' },
+    ]);
+  });
+
+  it('records the same hash whichever line endings the bundle arrived with', async () => {
+    const lf = repo();
+    const crlf = repo();
+    await applyBaseline(lf, bundle(1, { 'A.md': 'x\ny\n' }));
+    await applyBaseline(crlf, bundle(1, { 'A.md': 'x\r\ny\r\n' }));
+    expect(read(crlf, '.claude/cezar-baseline.json')).toBe(read(lf, '.claude/cezar-baseline.json'));
+  });
+});
+
 describe('baselineAudit', () => {
   it('walks none → current → diverged → outdated', async () => {
     const root = repo();

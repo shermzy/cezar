@@ -246,6 +246,10 @@ cezar sdlc baseline plan  --into ~/code/api   # what it would do, writes nothing
 cezar sdlc baseline apply --into ~/code/api   # create the missing files
 ```
 
+**Agent PR review runs in cezar, not in your repos.** The built-in `pr-review` workflow reviews a pull request it did not write: it reads the PR with `gh pr view`/`diff`/`checks`, follows the repo's `REVIEW.md` when there is one, sorts findings into Important and Nit (at most five), and posts **one** `gh pr comment`. It has no file-writing tool and no `gh pr review`, so it cannot approve, request changes, merge or edit; on the Claude backend that is enforced by its tool allowlist, on other backends it is an instruction. To turn it on, open Automations, choose the **Review new pull requests** template, and enable it; each PR it picks up becomes an ordinary task in its own worktree. Reviewing with a different backend or model than the author is recommended.
+
+Baseline v2 adds a `PreToolUse` hook, `.claude/hooks/guard-merge.mjs`, that blocks an agent's Bash from `gh pr merge`, `gh pr review --approve` and the equivalent `gh api` calls: an agent does not merge or approve a pull request, a human does. It tells a call from a mention, so a commit message or comment that quotes the command is not blocked. This binds Claude Code sessions in repos that adopted the baseline; it does not stop an agent on another backend, and GitHub branch protection (required reviews, no self-approval) remains the backstop. A repo on baseline v1 shows **Baseline outdated**; adopting again adds the guard and updates only files you have not edited.
+
 Put your own baseline in `~/.cezar/sdlc-baseline/` (a `manifest.json` plus the files it lists) to replace the built-in one; an invalid directory is ignored with one warning. Adoption is a local-checkout action and is unavailable on a hosted cockpit. Spec: `.ai/specs/2026-10-06-ai-native-sdlc-fleet.md`.
 
 ## Workflow format

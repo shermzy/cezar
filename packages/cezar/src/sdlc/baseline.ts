@@ -43,7 +43,13 @@ const repoManifestSchema = z.object({
 });
 type RepoManifest = z.infer<typeof repoManifestSchema>;
 
-const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
+/**
+ * Hash of the TEXT, not the bytes: line endings are normalised first. A baseline checked out on
+ * Windows is CRLF, one built on Linux is LF, and git rewrites a repository's own files either way
+ * (`core.autocrlf`); none of that is an edit by a person, and treating it as one would mark every
+ * file `diverged` the moment the repo changed machines.
+ */
+const sha256 = (text: string) => createHash('sha256').update(text.replaceAll('\r\n', '\n')).digest('hex');
 
 const builtInDir = () => resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'baseline');
 

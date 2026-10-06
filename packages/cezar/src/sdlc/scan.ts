@@ -244,17 +244,42 @@ async function detectConfigEvals(ctx: Context): Promise<SdlcPlayResult> {
     : result('config-evals', 'partial', evals, 'no workflow runs the evals when CLAUDE.md or .claude/** changes');
 }
 
+/** The automations store cezar writes under a project; read defensively, it is plain editable JSON. */
+const AUTOMATIONS_PATH = '.ai/cezar/automations.json';
+
+/** `[enabledReviewer, anyReviewer]`: automations running the built-in `pr-review` workflow. */
+async function cezarReviewAutomations(root: string): Promise<{ enabled: boolean; any: boolean }> {
+  const raw = await readCapped(root, AUTOMATIONS_PATH);
+  const doc = parseJson(raw);
+  const list = doc && Array.isArray(doc.automations) ? (doc.automations as unknown[]) : [];
+  let any = false;
+  let enabled = false;
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue;
+    const def = item as { enabled?: unknown; task?: unknown };
+    const task = def.task && typeof def.task === 'object' ? (def.task as { workflow?: unknown }) : null;
+    if (task?.workflow !== 'pr-review') continue;
+    any = true;
+    if (def.enabled === true) enabled = true;
+  }
+  return { enabled, any };
+}
+
 async function detectAgentReview(ctx: Context): Promise<SdlcPlayResult> {
   const reviewMd = await exists(ctx.root, 'REVIEW.md');
   const action = ctx.workflows.find((w) => /claude-code-action/.test(w.text));
-  const evidence = [...(reviewMd ? ['REVIEW.md'] : []), ...(action ? [action.path] : [])];
-  if (reviewMd && action) return result('agent-review', 'present', evidence);
-  if (reviewMd) return result('agent-review', 'partial', evidence, 'REVIEW.md without a CI review job');
-  if (action) return result('agent-review', 'partial', evidence, 'review job without REVIEW.md');
+  const cezar = await cezarReviewAutomations(ctx.root);
+  const job = action ? [action.path] : cezar.enabled ? [AUTOMATIONS_PATH] : [];
+  const evidence = [...(reviewMd ? ['REVIEW.md'] : []), ...job];
+  if (reviewMd && job.length > 0) return result('agent-review', 'present', evidence);
+  if (reviewMd) {
+    return result('agent-review', 'partial', evidence, cezar.any ? 'the cezar pr-review automation is paused: enable it' : 'REVIEW.md without a review job');
+  }
+  if (job.length > 0) return result('agent-review', 'partial', evidence, 'review job without REVIEW.md');
   return result('agent-review', 'absent');
 }
 
-const GATE = /push|deploy|release|publish|secret|\.env|credential/i;
+const GATE = /push|deploy|release|publish|merge|approve|secret|\.env|credential/i;
 
 function detectApprovalGates(ctx: Context): SdlcPlayResult {
   const gating = hookGroups(ctx.settings, 'PreToolUse').some((g) => GATE.test(g.matcher) || g.commands.some((c) => GATE.test(c)));

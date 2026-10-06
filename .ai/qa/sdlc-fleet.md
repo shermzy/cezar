@@ -66,3 +66,27 @@ are present in the tarball).
   (built CLI above), and the workflow runner's check-step path (existing suites).
 - `npm test` across the whole repo has many pre-existing failures on Windows (registry roots, bash, file modes);
   the files touched by this work were compared against a run without the change and add none.
+
+## 5. Phase 3: upgrading an adopted repo from baseline v1 to v2 (real built CLI)
+
+Repeats section 1 with the phase 1-2 bundle as an override, edits one file, then applies the built-in v2:
+
+```bash
+T=$(mktemp -d); H=$(mktemp -d); git init -q "$T"; echo '{"scripts":{"test":"vitest","typecheck":"tsc"}}' > "$T/package.json"
+mkdir -p "$H/sdlc-baseline" && git archive 3379547d packages/cezar/baseline | tar -x -C "$H/sdlc-baseline" --strip-components=3
+CEZ_HOME="$H" node packages/cezar/dist/index.js sdlc baseline apply --into "$T"     # v1
+echo "// my edit" >> "$T/.claude/hooks/format.mjs"
+node packages/cezar/dist/index.js sdlc baseline plan  --into "$T"                  # v1 -> v2
+node packages/cezar/dist/index.js sdlc baseline apply --into "$T"
+```
+
+Observed 2026-10-06: the plan updates `.claude/settings.json` and `REVIEW.md`, creates `.claude/hooks/guard-merge.mjs`,
+leaves `.claude/hooks/format.mjs` alone as `skip-diverged` (the edited file), and reports every other file
+`skip-current`. A second plan is all `skip-current`. `guard-merge.mjs` exits 2 on `gh pr merge 5` and 0 on
+`gh pr view 5` and on `git commit -m "explain gh pr merge"`.
+
+This run found a real bug before it shipped: on a Windows checkout the bundle is CRLF, so the first attempt reported
+`update` for files whose text had not changed. Hashes now normalise line endings (`baseline.test.ts`, "line endings
+never decide whether a file was edited"; red before the fix, green after).
+
+Not run: a live `pr-review` task against a real pull request (needs an agent login and a GitHub PR).

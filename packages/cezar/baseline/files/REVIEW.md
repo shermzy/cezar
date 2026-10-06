@@ -21,4 +21,9 @@ How an agent (or a person) reviews a pull request in this repository.
 
 ## Author and approver
 
-The agent that wrote a change does not approve it. A human or a separate reviewer approves.
+The agent that wrote a change does not approve or merge it. A human does, after a separate reviewer has looked.
+The `.claude/hooks/guard-merge.mjs` hook blocks an agent from running `gh pr merge` or `gh pr review --approve`.
+
+A separate reviewer can be a person or an agent that is not the author: cezar's built-in `pr-review` workflow
+reviews a pull request, posts one comment sorted into Important and Nit, and has no way to approve or merge.
+Prefer a different agent backend or model than the one that wrote the change.
