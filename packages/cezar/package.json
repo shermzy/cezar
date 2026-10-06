@@ -17,6 +17,7 @@
   },
   "files": [
     "dist",
+    "baseline",
     "web/dist",
     "scripts",
     "README.md"

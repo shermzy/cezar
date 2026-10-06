@@ -237,3 +237,25 @@ export const QUICK_TASK_WORKFLOW: WorkflowDef = {
     },
   ],
 };
+
+/**
+ * Adopt the SDLC baseline (spec 2026-10-06-ai-native-sdlc-fleet): ONE check step, no agent and no
+ * tokens, that writes the baseline files into the task worktree and stops at the review gate. It
+ * goes through the cockpit's own binary (`CEZ_BIN`, set by `serve`), never a `cez` on PATH that
+ * may be an older install without the `sdlc` command — so it runs in the cockpit, not headless.
+ */
+export const SDLC_BASELINE_WORKFLOW: WorkflowDef = {
+  name: 'sdlc-baseline',
+  description: 'Write the AI-native SDLC baseline files (CLAUDE.md, hooks, REVIEW.md, intent/) — no agent.',
+  source: 'built-in',
+  steps: [
+    {
+      id: 'apply',
+      name: 'Write the SDLC baseline files',
+      command: 'node "$CEZ_BIN" sdlc baseline apply --into .',
+    },
+  ],
+};
+
+/** Every workflow cezar ships; a repo workflow file of the same name shadows it. */
+export const BUILT_IN_WORKFLOWS: readonly WorkflowDef[] = [QUICK_TASK_WORKFLOW, SDLC_BASELINE_WORKFLOW];
