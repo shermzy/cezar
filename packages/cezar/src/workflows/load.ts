@@ -2,7 +2,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { extname, join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
-  QUICK_TASK_WORKFLOW,
+  BUILT_IN_WORKFLOWS,
   normalizeWorkflowDoc,
   stepsIssue,
   workflowFileSchema,
@@ -17,7 +17,7 @@ export interface WorkflowLoadIssue {
 }
 
 /**
- * Load the workflow catalog: the built-in `quick-task` plus every
+ * Load the workflow catalog: the built-in workflows (`quick-task`, `sdlc-baseline`) plus every
  * `.ai/cezar/workflows/*.{yaml,yml}` in the repo. File workflows win name
  * collisions with built-ins. Invalid files are reported, never fatal.
  */
@@ -63,7 +63,7 @@ export async function loadWorkflows(
   const fileNames = new Set(fromFiles.map((w) => w.name));
   const workflows = [
     ...fromFiles,
-    ...[QUICK_TASK_WORKFLOW].filter((w) => !fileNames.has(w.name)),
+    ...BUILT_IN_WORKFLOWS.filter((w) => !fileNames.has(w.name)),
   ];
   workflows.sort((a, b) => a.name.localeCompare(b.name));
   return { workflows, issues };

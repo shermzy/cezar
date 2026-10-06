@@ -23,5 +23,12 @@ export function findPackGaps(packedFiles: readonly string[]): string[] {
   if (!packedFiles.some((f) => f.startsWith('web/dist/assets/') && f.length > 'web/dist/assets/'.length)) {
     gaps.push('no web/dist/assets/* bundle in the tarball — the shell would load with no JS/CSS');
   }
+  // The SDLC baseline (spec 2026-10-06-ai-native-sdlc-fleet) is read at runtime from the package
+  // root; a tarball without it would answer every audit with a baseline that cannot load.
+  for (const required of ['baseline/manifest.json', 'baseline/files/CLAUDE.md']) {
+    if (!packedFiles.includes(required)) {
+      gaps.push(`${required} is missing — the SDLC baseline would not load (add "baseline" to the package "files")`);
+    }
+  }
   return gaps;
 }

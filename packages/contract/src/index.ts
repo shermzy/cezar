@@ -29,3 +29,4 @@ export * from './tracker.ts';
 export * from './self-update.ts';
 export * from './star-count.ts';
 export * from './auth.ts';
+export * from './sdlc.ts';

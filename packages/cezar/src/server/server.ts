@@ -97,6 +97,9 @@ import { RunnerModelCatalog } from '../core/runner-model-catalog.ts';
 import { currentUsage, currentTimedUsage, onUsage } from '../core/process-usage.ts';
 import { DashboardReader } from '../workspace/dashboard.ts';
 import { dashboardRoutes } from './dashboard.ts';
+import { sdlcRoutes, type AdoptResult } from './sdlc.ts';
+import { SdlcReader } from '../sdlc/reader.ts';
+import { startAdoption } from '../sdlc/adopt.ts';
 import { WORKFLOWS_DIR, loadWorkflows } from '../workflows/load.ts';
 import {
   QUICK_TASK_WORKFLOW,
@@ -6707,6 +6710,24 @@ export function createApp(deps: ServerDeps) {
     },
   });
 
+  // SDLC audit + baseline adoption (spec 2026-10-06-ai-native-sdlc-fleet): a bounded read-only scan,
+  // and an ordinary task per project (`sdlc/adopt.ts`) so it inherits isolation and the review gate.
+  const sdlcReader = new SdlcReader({
+    projects: async () => {
+      const selector = capabilities().singleProject ? { projectId: await resolveBootProject() } : undefined;
+      const projects = await listProjects(selector);
+      return projects.map((project) => ({ id: project.id, root: project.root, ...(project.name ? { name: project.name } : {}) }));
+    },
+  });
+  const adoptBaseline = async (projectId: string): Promise<AdoptResult> => {
+    try {
+      const ctx = projectId === (await resolveBootProject()) ? bootContext : await contexts.context(projectId);
+      return startAdoption(ctx);
+    } catch (err) {
+      return { error: (err instanceof Error ? err.message : 'Could not start the baseline task').slice(0, 300) };
+    }
+  };
+
   const offDashboardRegistry = workspaceEvents.on((event, data) => {
     if (event === 'project-removed') {
       const id = (data as { id?: unknown }).id;
@@ -6777,6 +6798,7 @@ export function createApp(deps: ServerDeps) {
     .route('/', specialistsRoutes)
     .route('/', runsIndexRoutes)
     .route('/', dashboardRoutes(dashboard, () => ({ tokens: capabilities().tokenUsageMetrics, cost: capabilities().costMetrics }), () => capabilities().automations))
+    .route('/', sdlcRoutes({ reader: sdlcReader, adopt: adoptBaseline, localHandoff: () => capabilities().localHandoff }))
     .route('/', workspaceEventsRoutes);
 
   // ---- mount ---------------------------------------------------------------

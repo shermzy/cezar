@@ -1,4 +1,5 @@
 import { DashboardAutomations } from './automations'
+import { SdlcView } from './sdlc'
 import { AutomationOutcomes, BackendComparison } from './insights'
 import { Overview } from './overview'
 import { useContext, useEffect, useRef, useState } from 'react'
@@ -48,6 +49,7 @@ const views = [
   ['overview', 'Overview'],
   ['costs', 'Usage & cost'],
   ['automations', 'Automations'],
+  ['sdlc', 'SDLC'],
 ] as const
 
 export function DashboardRoute() {
@@ -74,14 +76,18 @@ function DashboardView({ entryKey }: { entryKey: string }) {
       ? 'costs'
       : search.get('view') === 'automations'
         ? 'automations'
-        : 'overview'
+        : search.get('view') === 'sdlc'
+          ? 'sdlc'
+          : 'overview'
   const viewLabel = views.find(([id]) => id === view)![1]
   const viewTiles =
     view === 'costs'
       ? (['usage', 'trends'] as const)
       : view === 'automations'
         ? (['automations'] as const)
-        : (['fleet', 'needsYou', 'recent'] as const)
+        : view === 'sdlc'
+          ? ([] as const)
+          : (['fleet', 'needsYou', 'recent'] as const)
   const scope =
     view === 'overview'
       ? ['overview' as const, 'portfolio' as const, ...viewTiles]
@@ -490,6 +496,7 @@ function DashboardView({ entryKey }: { entryKey: string }) {
             }
           </Overview>
           {view === 'costs' && <BackendComparison />}
+          {view === 'sdlc' && <SdlcView />}
           <Sheet
             open={!!panel}
             onOpenChange={(open) => {
