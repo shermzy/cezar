@@ -257,6 +257,14 @@ function RunHeaderView({
             are what the run IS doing right now, not metadata about how it started. */}
         <DispatchParentLine run={run} />
         <DispatchChildrenLine run={run} />
+        {run.specialistSnapshot ? (
+          <div data-slot="specialist-role" className="mt-1 text-xs text-muted-foreground">
+            Specialist ·{' '}
+            <Link to={`/agents#specialist-${encodeURIComponent(run.specialistSnapshot.id)}`} className="font-medium text-foreground underline-offset-4 hover:underline">
+              {run.specialistSnapshot.name}
+            </Link>
+          </div>
+        ) : null}
 
         <div data-slot="run-tabs" className="mt-1.5 flex items-end gap-1 md:mt-2.5">
           <TabLink to={`/tasks/${run.id}`} active={tab === 'session'}>

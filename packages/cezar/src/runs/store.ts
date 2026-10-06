@@ -13,7 +13,7 @@ import { MAX_REF } from './task-refs.ts';
 import { workflowDefSchema } from '../workflows/types.ts';
 // A contract VALUE, like `workspaceUiStateSchema` in `workspace/migrations.ts`: the persisted
 // `dispatch` object and its wire half are literally the same schema, so they cannot drift.
-import { dispatchSchema, trackerAssociationSchema, trackerAutomationEventSchema } from '@open-mercato/cezar-contract';
+import { dispatchSchema, specialistSnapshotSchema, trackerAssociationSchema, trackerAutomationEventSchema } from '@open-mercato/cezar-contract';
 
 import { RUNNER_IDS } from '../core/agent-runner.ts';
 
@@ -172,6 +172,8 @@ export const runRecordSchema = z.object({
    *  own selection — an override for Claude says nothing about which Codex account a mixed
    *  workflow's codex step should use. Absent = follow the project. */
   agentProfile: z.string().optional(),
+  /** Immutable role prompt captured before the run entered the queue. */
+  specialistSnapshot: specialistSnapshotSchema.optional().catch(undefined),
   /** Echo of the extra system prompt this run actually used (R2): the
    *  `POST /api/runs` override, or the `config.json` default it fell back to.
    *  Deliberately NOT the full composed prompt — skill bodies and the handoff
@@ -969,6 +971,7 @@ export class RunStore extends EventEmitter {
     runner?: RunnerId;
     /** Composer's per-task agent account (spec 2026-07-29-agent-profiles). */
     agentProfile?: string;
+    specialistSnapshot?: RunRecord['specialistSnapshot'];
     generateFollowups?: boolean;
     autonomous?: boolean;
     worktree?: false;
@@ -990,6 +993,7 @@ export class RunStore extends EventEmitter {
       model: input.model,
       runner: input.runner,
       agentProfile: input.agentProfile,
+      specialistSnapshot: input.specialistSnapshot,
       generateFollowups: input.generateFollowups,
       autonomous: input.autonomous,
       worktree: input.worktree,

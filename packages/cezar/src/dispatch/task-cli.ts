@@ -26,7 +26,7 @@ const USAGE = `cez task — dispatch cezar tasks from inside a task (on by defau
 
   cez task create "<objective>" [--title "…"] [--kind implement|review] [--review-of <branch|run>]
                   [--scope "…"] [--budget <usd>] [--success "…"] [--evidence "…"] [--tools A,B]
-                  [--runner ${RUNNER_IDS.join('|')}] [--model <model>] [--retry-limit <0-3>]
+                  [--runner ${RUNNER_IDS.join('|')}] [--model <model>] [--specialist <id>] [--retry-limit <0-3>]
   cez task report --status done|partial|failed|blocked --result "…" [--evidence "…"]…
                   [--verdict approve|changes|reject] [--suggestions "…"]… [--confidence <0-1>]
                   [--side-effect "…"]… [--error "…"]… [--next "…"]
@@ -95,6 +95,7 @@ export async function runTaskCommand(
             tools: { type: 'string' },
             runner: { type: 'string' },
             model: { type: 'string' },
+            specialist: { type: 'string' },
             'retry-limit': { type: 'string' },
           },
         });
@@ -113,6 +114,7 @@ export async function runTaskCommand(
           ...(values.tools ? { allowed_tools: values.tools.split(',').map((tool) => tool.trim()).filter(Boolean) } : {}),
           ...(values.runner ? { runner: values.runner } : {}),
           ...(values.model ? { model: values.model } : {}),
+          ...(values.specialist ? { specialistId: values.specialist } : {}),
           ...(values['retry-limit'] !== undefined ? { retry_limit: number(values['retry-limit'], 'retry-limit') } : {}),
         };
         const response = await io.fetch(`${api.scope}/runs/${encodeURIComponent(env.CEZ_TASK_ID)}/dispatch`, {
