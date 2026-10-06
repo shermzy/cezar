@@ -145,6 +145,7 @@ import {
   runHistoryQuerySchema,
   runIdParamSchema,
   setRunDraftInputSchema,
+  deliveryRefreshInputSchema,
   type DeleteDraftResponse,
 } from '@open-mercato/cezar-contract';
 import { toPastedContent, type PastedContent, type RunManager } from '../workflows/run.ts';
@@ -225,6 +226,8 @@ import { browseDirectory, isInsideBrowseRoot, isLexicallyInsideBrowseRoot, resol
 import { parseRemote, resolveForge, type ForgeAvailability } from './forge/index.ts';
 import { authSessionToken, createAuthRoutes } from './auth-api.ts';
 import { allowAutomationCheck, revokeAllInternalCapabilities, verifyInternalCapability } from './internal-capabilities.ts';
+import type { ForgeDriver } from './forge/types.ts';
+import { DeliveryService } from '../delivery/service.ts';
 import { fetchGithub, fetchGithubChecks, fetchGithubComments, fetchGithubPrDiff, fetchGithubRefStatus, forgetRefStatus, readCachedRefStatuses, refNumberFromUrl, searchGithubItems, GithubPrNotFoundError, GH_CHECKS_MAX, GH_SEARCH_MAX, GH_REF_STATUS_MAX } from './github.ts';
 import { ensureLaunchKey } from './launch-key.ts';
 import { openInTerminal } from './open-in-terminal.ts';
@@ -259,6 +262,8 @@ export interface ServerDeps {
   store: RunStore;
   manager: RunManager;
   version: string;
+  /** Optional read-only forge capability used by delivery refresh tests and embedders. */
+  deliveryForge?: (repoRoot: string) => Promise<ForgeDriver | null>;
   /** Mutable holder for the async npm-registry update check (#368) —
    *  `latest` appears once the registry answers with a newer version. */
   update?: { latest?: string };
@@ -1213,6 +1218,9 @@ export function createApp(deps: ServerDeps) {
   // handler body would silently pin it to the boot project, which the rename
   // turns into a compile error instead.
   const bootRoot = deps.repoRoot;
+  const delivery = new DeliveryService(
+    deps.deliveryForge ?? (async (repoRoot) => resolveForge(await getRepoInfo(repoRoot))),
+  );
   const bootDataDir = join(bootRoot, '.ai/cezar');
   const modelCatalog = deps.modelCatalog ?? new RunnerModelCatalog({
     adapters: {
@@ -4255,6 +4263,36 @@ export function createApp(deps: ServerDeps) {
     // The read-receipt sweep (#unread-done-items) — the mark-read twin of the archive
     // sweep above, and under the same registration-order guard.
     .post('/runs/read-all', (c) => c.json({ read: c.get('project').store.markAllRead() }))
+
+    // Delivery is an explicit, stored-only read path. Refresh has no controls beyond the
+    // caller's action: it never merges, publishes, deploys, polls, or consumes an agent slot.
+    .get('/runs/:id/delivery', paramZodValidator(runIdParamSchema), (c) => {
+      const run = c.get('project').store.getRun(c.req.valid('param').id);
+      if (!run) return c.json({ error: 'not found' }, 404);
+      return c.json(run.delivery ?? null);
+    })
+
+    .post(
+      '/runs/:id/delivery/refresh',
+      paramZodValidator(runIdParamSchema),
+      jsonZodValidator(deliveryRefreshInputSchema, { absent: ({}) }),
+      async (c) => {
+        const project = c.get('project');
+        const id = c.req.valid('param').id;
+        if (!project.store.getRun(id)) return c.json({ error: 'not found' }, 404);
+        try {
+          return c.json(await delivery.refresh(project.root, project.store, id));
+        } catch (error) {
+          if (error instanceof Error && /run not found/.test(error.message)) {
+            return c.json({ error: 'not found' }, 404);
+          }
+          if (error instanceof Error && /association changed/.test(error.message)) {
+            return c.json({ error: error.message }, 409);
+          }
+          throw error;
+        }
+      },
+    )
 
     .post('/runs/:id/archive', jsonZodValidator(archiveSchema, { absent: ({}) }), async (c) => {
       const { store } = c.get('project');

@@ -1,4 +1,5 @@
 import type { RunRecord } from '../../runs/store.ts';
+import type { DeliveryCheck, DeliveryPr, DeliveryRepository } from '@open-mercato/cezar-contract';
 
 /**
  * Forge-driver seam (cockpit-ui redesign spec §"Forge-driver seam"): every
@@ -10,6 +11,26 @@ import type { RunRecord } from '../../runs/store.ts';
  */
 
 export type ForgeKind = 'github';
+
+export interface ForgeDeliveryRef {
+  number: number;
+  url?: string;
+}
+
+export type ForgeDeliveryObservation =
+  | {
+      available: true;
+      repository?: DeliveryRepository;
+      prs: DeliveryPr[];
+      checks: DeliveryCheck[];
+      truncated?: boolean;
+      reason?: string;
+    }
+  | {
+      available: false;
+      reason: string;
+      repository?: DeliveryRepository;
+    };
 
 /** Availability probe result — mirrors the tab's quiet degradation contract:
  *  no CLI, no remote, offline all land on `available:false` + a human hint. */
@@ -304,6 +325,8 @@ export interface ForgeDriver {
   /** The branch's open/merged PR, or null when none (or the forge is down). */
   prStatus(branch: string): Promise<ForgePrStatus | null>;
   prMergeState?(number: number, opts?: { refresh?: boolean }): Promise<ForgePrMergeStateResult>;
+  /** Bounded, read-only PR merge + target-branch Actions observation for delivery tracking. */
+  observeDelivery?(refs: readonly ForgeDeliveryRef[]): Promise<ForgeDeliveryObservation>;
   mergePR?(number: number, input: ForgeMergeInput): Promise<ForgeMergeResult>;
   /** Bounded, read-only file changes for a pull request. */
   prDiff?(number: number, opts?: { refresh?: boolean }): Promise<ForgePrDiffResult>;

@@ -64,6 +64,7 @@ describe('every mutating route carries a typed body into AppType', () => {
     Assert<HasTypedBody<'/api/v1/runs/:id', '$patch'>>,
     Assert<HasTypedBody<'/api/v1/runs/:id/archive', '$post'>>,
     Assert<HasTypedBody<'/api/v1/runs/:id/pin', '$post'>>,
+    Assert<HasTypedBody<'/api/v1/runs/:id/delivery/refresh', '$post'>>,
     Assert<HasTypedBody<'/api/v1/runs/:id/continue', '$post'>>,
     Assert<HasTypedBody<'/api/v1/runs/:id/messages', '$post'>>,
     Assert<HasTypedBody<'/api/v1/runs/:id/open-in', '$post'>>,
@@ -118,6 +119,8 @@ describe('every mutating route carries a typed body into AppType', () => {
     // The draft surface reaches the filesystem as a path segment, so its validation must be
     // middleware — a handler-side check would leave the route typed as taking any string (#939).
     Assert<HasTypedInput<'/api/v1/runs/:id/drafts/:surface', '$put', 'param'>>,
+    Assert<HasTypedInput<'/api/v1/runs/:id/delivery', '$get', 'param'>>,
+    Assert<HasTypedInput<'/api/v1/runs/:id/delivery/refresh', '$post', 'param'>>,
     Assert<HasTypedInput<'/api/v1/runs/:id/drafts/:surface', '$delete', 'param'>>,
     Assert<HasTypedInput<'/api/v1/runs/:id/drafts/:surface/images', '$post', 'param'>>,
     Assert<HasTypedInput<'/api/v1/runs/:id/drafts/:surface/images/:imageId', '$get', 'param'>>,

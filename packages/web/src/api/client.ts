@@ -134,6 +134,8 @@ import type {
   TrackerItemResponse,
   TrackerItemsResponse,
   TrackerKind, TrackerCredentials, TrackerConnectionResponse,
+  DeliveryGetResponse,
+  DeliveryRefreshResponse,
 } from '@open-mercato/cezar-api-client'
 import { parseProviderStatusResponse } from '@/lib/provider-status'
 import {
@@ -566,6 +568,18 @@ export async function getProjectRun(projectId: string, id: string, opts?: ReadOp
       init(opts),
     ),
     runPath(id),
+  )
+}
+
+/** Stored delivery evidence for one run. The read is deliberately separate from the run record:
+ * opening a task never authorizes a GitHub refresh, and an untracked run answers `null`. */
+export async function getRunDelivery(id: string, opts?: ReadOptions, projectId = queryScope()): Promise<DeliveryGetResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id'].delivery.$get(
+      { param: { projectId, id: encodeURIComponent(id) } },
+      init(opts),
+    ),
+    runPath(id, '/delivery'),
   )
 }
 
@@ -1501,6 +1515,18 @@ export async function createRunPr(id: string): Promise<CreatePrResponse> {
       param: { projectId: queryScope(), id: encodeURIComponent(id) },
     }),
     runPath(id, '/pr'),
+  )
+}
+
+/** Explicitly start or refresh read-only delivery observation. No interval or hidden refresh is
+ * attached here; the panel owns the user's click and the response becomes the cached evidence. */
+export async function refreshRunDelivery(id: string, projectId = queryScope()): Promise<DeliveryRefreshResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id'].delivery.refresh.$post({
+      param: { projectId, id: encodeURIComponent(id) },
+      json: {},
+    }),
+    runPath(id, '/delivery/refresh'),
   )
 }
 
