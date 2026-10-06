@@ -457,6 +457,70 @@
   }
 }
 
+/* ---------- running beam + shimmer text (Board, spec 2026-10-04-kanban-board § Phase 1c) ----------
+ * Ported from BoardUI (t3grp/boardui-pro, MIT — the notice is in components/running-beam.tsx):
+ * the Composer Loader's `bui-composer-loader-dash` and the agent log's
+ * `.agent-progress-loading-text`, with token colours.
+ *
+ * The beam: dash segments on a pathLength-normalized SVG stroke — the offset laps once per
+ * duration. Reduced motion swaps the travelling light for a still violet rim.
+ *
+ * `.shimmer-text` is a running card's status label: a slower, softer sweep than `.shimmer` above
+ * (the tool-card title's), and plain muted text under reduced motion. */
+
+@keyframes running-beam-dash {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: -100;
+  }
+}
+.running-beam-rim {
+  display: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .running-beam-light {
+    display: none;
+  }
+  .running-beam-rim {
+    display: block;
+  }
+}
+
+@keyframes shimmer-text-sweep {
+  from {
+    background-position: 200% center;
+  }
+  to {
+    background-position: -100% center;
+  }
+}
+.shimmer-text {
+  color: transparent;
+  background-image: linear-gradient(
+    100deg,
+    var(--muted-foreground) 16%,
+    var(--muted-foreground) 38%,
+    var(--foreground) 50%,
+    var(--muted-foreground) 62%,
+    var(--muted-foreground) 84%
+  );
+  background-position: 200% center;
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: shimmer-text-sweep 3.4s linear infinite;
+  will-change: background-position;
+}
+@media (prefers-reduced-motion: reduce) {
+  .shimmer-text {
+    color: var(--muted-foreground);
+    background-image: none;
+    animation: none;
+  }
+}
+
 /* ---------- ghost code (new-task hero backdrop) ----------
  * The `/new` hero's "someone is quietly writing code" texture (ghost-code-backdrop.tsx).
  * Character-by-character reveal is the classic CSS typewriter: the line clips at `width`,

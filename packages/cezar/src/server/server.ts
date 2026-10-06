@@ -203,6 +203,7 @@ import { checkoutRepo, type CloneRunner } from './checkout.ts';
 import { ProjectContextError, ProjectContexts, type ProjectContext } from './project-context.ts';
 import { reviewGateEnabled } from '../runs/review-gate.ts';
 import { readUiState, uiStatePath } from '../ui-state.ts';
+import { runAgentFields } from '../runs/run-agent.ts';
 import { agentHomePaths, expandTilde } from '../paths.ts';
 import { isLoopbackHostHeader, normalizeHostname, resolveCapabilities } from './capabilities.ts';
 import { createSocketHub, type SocketHub, type WsUpgradeVerdict } from './ws.ts';
@@ -817,6 +818,11 @@ const appearanceSchema = z.object({
   width: z.enum(['narrow', 'wide']).optional(),
 });
 
+/** One Board column's saved order (board phase 1c): run ids, top to bottom. Run ids are 36-char
+ *  UUIDs; 64 leaves room without letting the largest valid `board` — 3 columns × 500 ids — outgrow
+ *  UI_STATE_BODY_LIMIT (128 KiB). The cockpit caps at the same 500 (`BOARD_ORDER_LIMIT`). */
+const boardOrderIdsSchema = z.array(z.string().min(1).max(64)).max(500);
+
 const uiStateSchema = z
   .object({
     // `null` clears the recorded choice — the composer's "no skill, no workflow" state,
@@ -899,6 +905,23 @@ const uiStateSchema = z
     // `importedSkills` curation (see `workspaceUiStateSchema`); `.passthrough()` would preserve
     // the key regardless, but keep it typed.
     dismissedSkillsBanner: z.boolean().optional(),
+    // The Board's hand-picked order (spec 2026-10-04-kanban-board § Phase 1c): one id list per
+    // reorderable column (Queued and Done keep their own order). The top-level merge is shallow, so
+    // the cockpit always PUTs the whole `board` object. `.passthrough()` at both levels, like the
+    // bag itself: a `board` key a newer cockpit writes must survive this server's PUT.
+    board: z
+      .object({
+        order: z
+          .object({
+            running: boardOrderIdsSchema.optional(),
+            'needs-you': boardOrderIdsSchema.optional(),
+            review: boardOrderIdsSchema.optional(),
+          })
+          .passthrough()
+          .optional(),
+      })
+      .passthrough()
+      .optional(),
   })
   .passthrough();
 
@@ -6417,6 +6440,9 @@ export function createApp(deps: ServerDeps) {
     archived: run.archived,
     ...(run.autoResumeAt !== undefined ? { autoResumeAt: run.autoResumeAt } : {}),
     workflow: run.workflow,
+    // Which agent, account and model (board phase 1c): the row has no `steps[]`, so the account
+    // the task RAN on is derived here — one rule, shared with the dashboard's rows.
+    ...runAgentFields(run),
     ...(run.branch !== undefined ? { branch: run.branch } : {}),
     ...(run.dispatch !== undefined
       ? {

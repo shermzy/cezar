@@ -31,6 +31,7 @@ import {
   type CostVisibility,
 } from './dashboard-costs.ts';
 import { currentTimedUsage } from '../core/process-usage.ts';
+import { runAgentFields } from '../runs/run-agent.ts';
 import { readRunIndexDiagnostic } from '../runs/run-index.ts';
 import type { RunStore } from '../runs/store.ts';
 import { getDashboardGithub } from './dashboard-forge.ts';
@@ -271,7 +272,9 @@ export class DashboardReader {
         const slim: DashboardTaskRow[] = [];
         let omitted = diagnostic.omittedRuns;
         for (const run of diagnostic.runs) {
-          const parsed = dashboardTaskRowSchema.safeParse({ ...run, projectId: project.id });
+          // `runAgentFields`: the same derived runner/model/account as the runs index, whose row
+          // schema this one is (board phase 1c) — one meaning per key across both payloads.
+          const parsed = dashboardTaskRowSchema.safeParse({ ...run, ...runAgentFields(run), projectId: project.id });
           if (parsed.success) slim.push(parsed.data);
           else omitted++;
         }

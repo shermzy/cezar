@@ -171,6 +171,10 @@ describe('workspace runs index API', () => {
       'peakRssBytes',
       'peakProcCount',
       'usage',
+      // Board phase 1c: no runner asked, no step ran, no account picked — so none of the three.
+      'runner',
+      'model',
+      'accountId',
     ]) {
       expect(Object.keys(row!), key).not.toContain(key);
     }
@@ -195,6 +199,31 @@ describe('workspace runs index API', () => {
     expect(row).toMatchObject({ costUsd: 0.31, peakRssBytes: 943718400, peakProcCount: 4 });
     // The LIVE sample is not persisted, so a cold project's row never carries one.
     expect(Object.keys(row!)).not.toContain('usage');
+  });
+
+  it('carries which agent, account and model a task is on — the account its last step RAN on', async () => {
+    // Board phase 1c (spec 2026-10-04-kanban-board): the All-boards card's top line. The row has no
+    // `steps[]`, so the server derives them; a step's `profileId` (what ran) beats the task's own
+    // `agentProfile` (what was asked), and a task that names no runner shows the one it ran on.
+    await registerProject(repoRoot);
+    await registerProject(otherRoot);
+    seedColdProject(otherRoot, [
+      storedRun({
+        id: 'agented',
+        title: 'Agented',
+        model: 'gpt-5.2-codex',
+        agentProfile: 'default',
+        steps: [
+          { id: 's1', name: 'work', kind: 'agent', status: 'done', iterations: 1, tokensUsed: 0, backend: 'codex', profileId: 'codex-work' },
+        ],
+      }),
+    ]);
+
+    const body = await getIndex();
+    const row = body.runs.find((entry) => entry.id === 'agented');
+
+    expect(row).toMatchObject({ runner: 'codex', model: 'gpt-5.2-codex', accountId: 'codex-work' });
+    expect(row).not.toHaveProperty('steps');
   });
 
   it('carries the tracker-reference inputs so a cross-project row can show its PR/issue chip', async () => {

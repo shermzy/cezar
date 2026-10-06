@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { AgentBrowser, cezarCli, fixtureServeEnv } from './agent-browser'
+import { AgentBrowser, cezarCli, fixtureServeEnv, getJson } from './agent-browser'
 
 /**
  * The review gate (R3 Step 2.2) end-to-end, against a LIVE dry run — cezar's core promise
@@ -49,7 +49,7 @@ async function waitForHealth(url: string): Promise<void> {
 
 async function waitForStatus(url: string, id: string, wanted: string[]): Promise<string> {
   for (let attempt = 0; attempt < 120; attempt += 1) {
-    const record = (await (await fetch(`${url}/api/v1/runs/${id}`)).json()) as { status: string }
+    const record = await getJson<{ status: string }>(`${url}/api/v1/runs/${id}`)
     if (wanted.includes(record.status)) return record.status
     await new Promise((r) => setTimeout(r, 500))
   }

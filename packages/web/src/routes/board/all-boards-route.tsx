@@ -1,19 +1,22 @@
 import { TriangleAlertIcon } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import type { To } from 'react-router'
 
-import { useProjects, useRunsForProject, useRunsIndex } from '@/api/queries'
+import { useAgentProfiles, useProjects, useRunsForProject, useRunsIndex } from '@/api/queries'
 import type { ApiRun, RunIndexEntry } from '@open-mercato/cezar-api-client'
 import { CenteredState } from '@/components/centered-state'
 import { Button } from '@/components/ui/button'
 import { BOARD_COLUMNS, BOARD_COLUMN_LABELS } from '@/lib/board-columns'
 import { groupLanes } from '@/lib/board-lanes'
 import { scopeTo } from '@/lib/project-router'
+import { useIsDesktop } from '@/lib/use-desktop'
 import { useNow } from '@/lib/use-now'
 import { useProjectOrder } from '@/lib/use-project-order'
 import { cn } from '@/lib/utils'
 
 import { BoardLane, LANE_GRID_CLASS, LANE_GRID_MIN_WIDTH_CLASS } from './board-lane'
+import { BoardMoveDialog } from './board-move-dialog'
+import { useBoardMoves } from './use-board-moves'
 
 /** The global Tasks page's backstop interval, for the same reason: the workspace stream's `run`
  *  events already invalidate the index (debounced, `global-events.tsx`); this covers a dropped
@@ -65,6 +68,9 @@ function boardRuns(
  * Loading waits for every source the lanes need, so the "no tasks" hint can never flash before
  * the boot folder's runs arrive. An error screen shows only when a failing query has no data: a
  * failed background refetch keeps the board.
+ *
+ * Moves (spec § Phase 1c): each open lane is its own drag area, and every action goes to the
+ * card's OWN project through the project-explicit client calls — one shared confirm dialog.
  */
 export function AllBoardsRoute() {
   const projects = useProjects()
@@ -75,6 +81,13 @@ export function AllBoardsRoute() {
   const bootRuns = useRunsForProject(bootId, bootId)
   const { order } = useProjectOrder()
   const now = useNow(CLOCK_TICK_MS)
+  const profiles = useAgentProfiles()
+  const desktop = useIsDesktop()
+  // Every card carries its project (`boardRuns` stamps the boot folder's own rows too).
+  const moves = useBoardMoves(
+    useCallback((run: { projectId?: string }) => run.projectId ?? bootId ?? 'default', [bootId]),
+  )
+  const agentLine = useMemo(() => ({ profiles: profiles.data?.profiles }), [profiles.data])
   const [showOlderDone, setShowOlderDone] = useState(false)
   const [showQuiet, setShowQuiet] = useState(false)
   /** Explicit per-project choices, which win over the live default until the page unmounts. */
@@ -138,6 +151,10 @@ export function AllBoardsRoute() {
         expanded={expanded}
         now={now}
         perProjectLimit={perProjectLimit}
+        bootId={bootId}
+        moves={moves}
+        agentLine={agentLine}
+        dragEnabled={desktop}
         onToggle={() =>
           setChoices((current) => {
             const next = new Map(current)
@@ -214,6 +231,7 @@ export function AllBoardsRoute() {
           ) : null}
         </div>
       </div>
+      <BoardMoveDialog moves={moves} />
     </div>
   )
 }

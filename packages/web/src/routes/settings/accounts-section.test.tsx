@@ -179,6 +179,7 @@ function renderAccounts() {
       </MemoryRouter>
     </QueryClientProvider>,
   )
+  return client
 }
 
 const rows = () => [...document.querySelectorAll('[data-slot="account-row"]')]
@@ -442,6 +443,34 @@ describe('the agent accounts section', () => {
 
     await waitFor(() => expect(requests.some((r) => r.method === 'PATCH')).toBe(true))
     expect(requests.find((r) => r.method === 'PATCH')?.body).toEqual({ label: 'Client A' })
+  })
+
+  // The draft used to be seeded once, when "Show details" mounted, so a rename made elsewhere (another
+  // tab, the CLI, a refetch) left the field offering the OLD name — and Save would write it back.
+  it('opens Rename on the name the account has NOW, not the one it had when the panel opened', async () => {
+    serve({
+      defaults: {},
+      editable: true, manageable: true,
+      profileCapableProviders: ['claude', 'codex'],
+      selections: {},
+      profiles: [...DEFAULTS, profile({ id: 'klaudiusz', label: 'Klaudiusz' })],
+    })
+    const client = renderAccounts()
+
+    const row = await openDetails('klaudiusz')
+    // Someone else renames it while this panel stands open.
+    act(() => {
+      client.setQueryData<AgentProfilesResponse>(workspaceQueryKeys.agentProfiles, (current) =>
+        current && {
+          ...current,
+          profiles: current.profiles.map((p) => (p.id === 'klaudiusz' ? { ...p, label: 'Client B' } : p)),
+        },
+      )
+    })
+    await waitFor(() => expect(row.textContent).toContain('Client B'))
+
+    fireEvent.click(row.querySelector('[data-action="account-rename"]')!)
+    expect(screen.getByLabelText<HTMLInputElement>('Name for Client B').value).toBe('Client B')
   })
 
   it('confirms a removal by saying what is NOT deleted', async () => {
@@ -940,5 +969,77 @@ describe('the add-account dialog', () => {
         "that is already this agent's default folder",
       ),
     )
+  })
+
+  // What a hosted cockpit that manages its accounts sends (spec 2026-10-04-hosted-agent-accounts H2):
+  // no folder anywhere, so the Name is the one required field.
+  describe('on a hosted cockpit that manages its accounts', () => {
+    const HOSTED_DEFAULTS: AgentProfile[] = [
+      { id: 'default', provider: 'claude', label: 'Default', isDefault: true },
+      { id: 'default', provider: 'codex', label: 'Default', isDefault: true },
+    ]
+    const serveHosted = (options: Parameters<typeof serve>[1] = {}) =>
+      serve(
+        { editable: false, manageable: true, profileCapableProviders: ['claude', 'codex'],
+          defaults: {},
+          selections: {}, profiles: HOSTED_DEFAULTS },
+        options,
+      )
+    const nameField = () => screen.getByLabelText<HTMLInputElement>('Account name')
+    const refuse = async (text: string) => {
+      fireEvent.change(nameField(), { target: { value: 'Work' } })
+      fireEvent.click(confirmButton())
+      await waitFor(() => expect(document.querySelector('[data-slot="add-account-error"]')?.textContent).toBe(text))
+    }
+
+    it('puts the cursor in the Name field and says it is required', async () => {
+      serveHosted()
+      renderAccounts()
+      await openDialog()
+
+      expect(document.activeElement).toBe(nameField())
+      expect(nameField().getAttribute('aria-required')).toBe('true')
+      // Never a folder here — the server refuses a path on a hosted cockpit.
+      expect(document.querySelector('[data-slot="add-account-dir"]')).toBeNull()
+    })
+
+    it('announces a refusal, and ties the Name field to it', async () => {
+      serveHosted({ createStatus: 409, createError: 'that name is already used' })
+      renderAccounts()
+      await openDialog()
+      // Nothing to describe until something went wrong.
+      expect(nameField().getAttribute('aria-describedby')).toBeNull()
+
+      await refuse('that name is already used')
+
+      const alert = screen.getByRole('alert')
+      expect(alert.textContent).toBe('that name is already used')
+      expect(alert.id).not.toBe('')
+      expect(nameField().getAttribute('aria-describedby')).toBe(alert.id)
+    })
+
+    it('drops a stale refusal as soon as the name is retyped', async () => {
+      serveHosted({ createStatus: 409, createError: 'that name is already used' })
+      renderAccounts()
+      await openDialog()
+      await refuse('that name is already used')
+
+      fireEvent.change(nameField(), { target: { value: 'Work 2' } })
+
+      await waitFor(() => expect(document.querySelector('[data-slot="add-account-error"]')).toBeNull())
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(nameField().getAttribute('aria-describedby')).toBeNull()
+    })
+  })
+
+  it('leaves the Name optional on a local cockpit, where the folder is what is required', async () => {
+    serve({ editable: true, manageable: true, profileCapableProviders: ['claude', 'codex'],
+      defaults: {},
+      selections: {}, profiles: DEFAULTS })
+    renderAccounts()
+    await openDialog()
+
+    expect(screen.getByLabelText('Account name').getAttribute('aria-required')).toBeNull()
+    expect(document.activeElement).not.toBe(screen.getByLabelText('Account name'))
   })
 })

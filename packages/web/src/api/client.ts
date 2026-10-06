@@ -688,6 +688,12 @@ export async function getConfig(opts?: ReadOptions): Promise<ConfigResponse> {
   )
 }
 
+/** The same read by EXPLICIT project — see `getProjectRun`. The All-boards board re-runs a card of
+ *  ANY project, and needs that project's `modelsLocked` and `defaultRunner`, not the boot one's. */
+export async function getProjectConfig(projectId: string, opts?: ReadOptions): Promise<ConfigResponse> {
+  return unwrap(await cez.api.v1.p[':projectId'].config.$get({ param: { projectId } }, init(opts)), '/config')
+}
+
 /** The selected project's agent-owned config catalog and current file state. */
 export async function getAgentConfig(opts: ReadOptions = {}): Promise<AgentConfigListing> {
   return unwrap(
@@ -1480,6 +1486,43 @@ export async function continueProjectRun(
   )
 }
 
+/**
+ * The Board's confirmed moves (spec 2026-10-04-kanban-board § Phase 1c) by EXPLICIT project — the
+ * twins of `finishRun`, `cancelRun`, `cancelAutoResume` and `createRun`, for the reason
+ * `archiveProjectRun` spells out: the All-boards board acts on cards of every project, and
+ * `queryScope()` would name the boot one. The per-project board uses them too, with its own id,
+ * so both boards act through ONE code path.
+ */
+export async function finishProjectRun(projectId: string, id: string): Promise<FinishResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id'].finish.$post({ param: { projectId, id: encodeURIComponent(id) } }),
+    runPath(id, '/finish'),
+  )
+}
+
+/** `{ cancelled: false }` is a 200, not an error: the run was neither queued nor running when the
+ *  request landed. Callers must read the answer. */
+export async function cancelProjectRun(projectId: string, id: string): Promise<CancelResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id'].cancel.$post({ param: { projectId, id: encodeURIComponent(id) } }),
+    runPath(id, '/cancel'),
+  )
+}
+
+export async function cancelProjectAutoResume(projectId: string, id: string): Promise<CancelAutoResumeResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id']['auto-resume'].$delete({
+      param: { projectId, id: encodeURIComponent(id) },
+    }),
+    runPath(id, '/auto-resume'),
+  )
+}
+
+/** ×1 answers the run record; ×2/×3 answers `{ runs }` — narrow on `'runs' in result`. */
+export async function createProjectRun(projectId: string, input: CreateRunInput): Promise<CreateRunResponse> {
+  return unwrap(await cez.api.v1.p[':projectId'].runs.$post({ param: { projectId }, json: input }), '/runs')
+}
+
 /** Draft PR from the review gate (spec 009): push the branch, `gh pr create --draft`; the run
  *  completes as done with the PR badge. On 409 the ApiError's `manual` carries the
  *  `git merge <branch>` fallback to show copyable. */
@@ -2040,6 +2083,17 @@ export async function putUiState(patch: UiState): Promise<UiState> {
     }),
     '/ui-state',
   )
+}
+
+/** The per-project GUI state by EXPLICIT project (board phase 1c): each All-boards lane reads and
+ *  writes its OWN project's `board` order. Same shallow merge as `putUiState` — send whole
+ *  top-level objects. */
+export async function getProjectUiState(projectId: string, opts?: ReadOptions): Promise<UiState> {
+  return unwrap(await cez.api.v1.p[':projectId']['ui-state'].$get({ param: { projectId } }, init(opts)), '/ui-state')
+}
+
+export async function putProjectUiState(projectId: string, patch: UiState): Promise<UiState> {
+  return unwrap(await cez.api.v1.p[':projectId']['ui-state'].$put({ param: { projectId }, json: patch }), '/ui-state')
 }
 
 /** The cross-project GUI state (`~/.cezar/ui-state.json`, step 2.7). Workspace-level:

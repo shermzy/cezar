@@ -407,6 +407,16 @@ export const runIndexEntrySchema = z.object({
   peakRssBytes: z.number().optional(),
   peakProcCount: z.number().optional(),
   /**
+   * Which agent, account and model the task is on — the All-boards card's top line (spec
+   * 2026-10-04-kanban-board § Phase 1c). Derived server-side (`src/runs/run-agent.ts`) because this
+   * row carries no `steps[]`: `runner` is the task's own, else the backend its last step ran on;
+   * `accountId` is the last step's `profileId` (the account that ran), else the task's
+   * `agentProfile`; `model` is verbatim. Each is absent when unknown — never a guessed default.
+   */
+  runner: runnerSchema.optional(),
+  model: z.string().optional(),
+  accountId: z.string().optional(),
+  /**
    * The live CPU/RSS sample of this run's process tree, attached on the way out exactly as
    * `GET /runs` attaches it (`withUsage`) — never persisted.
    *

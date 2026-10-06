@@ -131,6 +131,23 @@ const appearanceSchema = z.object({
   width: z.enum(['narrow', 'wide']).optional(),
 });
 
+/**
+ * The per-project Board's prefs (spec 2026-10-04-kanban-board § Phase 1c): the hand-picked order
+ * of the three reorderable columns, run ids top to bottom. Queued (cezar's real start order) and
+ * Done (history) have none. Open at both levels, like the bag itself: a key a newer cockpit adds
+ * to `board` must survive this one. The write side's bounds live in the server's schema.
+ */
+export const boardUiStateSchema = z.looseObject({
+  order: z
+    .looseObject({
+      running: z.array(z.string()).optional(),
+      'needs-you': z.array(z.string()).optional(),
+      review: z.array(z.string()).optional(),
+    })
+    .optional(),
+});
+export type BoardUiState = z.infer<typeof boardUiStateSchema>;
+
 const taskTableUiStateSchema = z.looseObject({
   /** Explicit user choices only. Missing ids keep the registry-owned default. */
   expandedColumns: z.record(z.string(), z.boolean()).optional(),
@@ -195,6 +212,9 @@ export const uiStateSchema = z.looseObject({
   /** The open-mercato/skills promo banner (#391), dismissed for good. Legacy — the banner is
    *  gone, replaced by `WorkspaceUiState.importedSkills`; retained so old files round-trip. */
   dismissedSkillsBanner: z.boolean().optional(),
+  /** The Board's hand-picked column order (board phase 1c). Absent → every column keeps its
+   *  default order. */
+  board: boardUiStateSchema.optional(),
 });
 export type UiState = z.infer<typeof uiStateSchema>;
 

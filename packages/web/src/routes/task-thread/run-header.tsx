@@ -36,7 +36,7 @@ import {
   useRunHandoff,
   useRuns,
 } from '@/api/queries'
-import { DEFAULT_AGENT_ACCOUNT_ID, type ApiRun, type OpenTarget } from '@open-mercato/cezar-api-client'
+import type { ApiRun, OpenTarget } from '@open-mercato/cezar-api-client'
 import { DiffStatLabel } from '@/components/diff-stat'
 import { TitleEditInput, useTitleEditor, type TitleEditor } from '@/components/editable-title'
 import { Pill } from '@/components/pill'
@@ -69,6 +69,7 @@ import { toast } from '@/components/ui/toaster'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { DirectionalUsage } from '@/components/directional-usage'
 import { budgetStop, deriveAttention } from '@/lib/attention'
+import { agentSummary } from '@/lib/agent-summary'
 import { queuePositions, runTitle } from '@/lib/task-groups'
 import { usableRunners } from '@/lib/provider-status'
 import {
@@ -999,21 +1000,19 @@ function AgentBadge({ run, continuationEngine }: { run: ApiRun; continuationEngi
   // `/api/health` describes the boot project and can name the wrong runner on scoped routes.
   const config = useConfig()
   const profiles = useAgentProfiles()
-  const runner = run.runner ?? config.data?.defaultRunner ?? 'claude'
-  const model = run.model ?? 'auto'
-  // The account is read from the STEP that actually spawned, never from the run's composer
-  // override or the project's current selection (spec 2026-07-29-agent-profiles): the override is
-  // absent whenever the run just followed the project, and the project's selection can have been
-  // changed since — both would name an account this run may never have touched. The last step that
-  // recorded one is what ran; `sessionId` and `profileId` are a pair for exactly this reason.
-  const accountId = [...run.steps].reverse().find((step) => step.profileId)?.profileId
-  const account = accountId === undefined
-    ? undefined
-    : accountId === DEFAULT_AGENT_ACCOUNT_ID
-      ? 'default'
-      // A deleted account still names the folder this run's sessions live in, so the id is shown
-      // rather than swallowed — "gone" is the useful half of that answer.
-      : profiles.data?.profiles.find((p) => p.id === accountId)?.label ?? `${accountId} (removed)`
+  // ONE rule and ONE format with the Board card's top line (`lib/agent-summary.ts`, board phase
+  // 1c). The account is the STEP's that actually spawned — `sessionId` and `profileId` are a pair —
+  // and only before any step recorded one (a queued task) the task's own pick; never the project's
+  // current selection, which can have changed since and would name an account this run never
+  // touched. A deleted account is still named, marked removed: its id is the only pointer left to
+  // the folder its sessions live in. The discovered account reads as its provider's label, so a
+  // renamed Default login shows its new name.
+  // Always a summary: a default runner is always passed, so a runner is always known.
+  const agent = agentSummary(run, {
+    defaultRunner: config.data?.defaultRunner ?? 'claude',
+    profiles: profiles.data?.profiles,
+  })!
+  const { runner, account, model } = agent
   // The canonical `provider/model` the run actually resolved to (#405), shown only when it says
   // something `model` does not (#546). `model` is the free-text the caller ASKED for — `opus`,
   // `auto`, a gateway id — so on a repo whose Claude runner points at a custom endpoint the two
@@ -1022,7 +1021,7 @@ function AgentBadge({ run, continuationEngine }: { run: ApiRun; continuationEngi
   // omitted-not-guessed rule as the account line below: an identity nothing wrote down is not
   // one this header may invent.
   const identity = run.modelIdentity && run.modelIdentity !== model ? run.modelIdentity : undefined
-  const summary = [runner, account, model].filter(Boolean).join(' · ')
+  const summary = agent.text
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useId, useState } from 'react'
 
 import { useCreateAgentProfile } from '@/api/queries'
 import type { FsBrowseDir, ProviderId } from '@open-mercato/cezar-api-client'
@@ -61,6 +61,8 @@ export function AddAccountDialog({
   const [configDir, setConfigDir] = useState('')
   const [browsing, setBrowsing] = useState(false)
   const create = useCreateAgentProfile()
+  // The server's refusal is announced, and the Name field points at it while it shows.
+  const errorId = useId()
 
   const trimmed = configDir.trim()
   const name = label.trim()
@@ -139,9 +141,16 @@ export function AddAccountDialog({
               type="text"
               aria-label="Account name"
               data-slot="add-account-label"
+              // Hosted, the name is the only field — and it is required, so it takes the cursor.
+              autoFocus={hosted}
+              aria-required={hosted ? true : undefined}
+              aria-describedby={create.isError ? errorId : undefined}
               value={label}
               placeholder="Work"
-              onChange={(event) => setLabel(event.target.value)}
+              onChange={(event) => {
+                setLabel(event.target.value)
+                create.reset() // a stale "already used" must not outlive the name it was about
+              }}
               className="min-w-0 flex-1 rounded-md border border-input bg-card px-2 py-1 text-[13px] outline-none focus-visible:border-ring"
             />
           </label>
@@ -202,8 +211,17 @@ export function AddAccountDialog({
         {/* The server's own words: "that is already this agent's default folder", "already used
             by …", "must be an absolute path". This dialog cannot know which applies. */}
         {create.isError ? (
-          <p data-slot="add-account-error" className="min-w-0 break-words text-[13px] text-danger">
-            {create.error instanceof Error ? create.error.message : 'could not add that folder'}
+          <p
+            id={errorId}
+            role="alert"
+            data-slot="add-account-error"
+            className="min-w-0 break-words text-[13px] text-danger"
+          >
+            {create.error instanceof Error
+              ? create.error.message
+              : hosted
+                ? 'Could not add that account.'
+                : 'could not add that folder'}
           </p>
         ) : null}
 

@@ -70,8 +70,8 @@ import { AddAccountDialog } from './add-account-dialog'
  * identity, and raw CLI output never cross this boundary" — so it is built to stay narrow: the data
  * is NOT a field on the accounts listing, it comes from its own on-demand route
  * (`useAgentAccountDetails`, `enabled` only once the row is expanded), and it is refused in hosted
- * mode. Nothing fetches it until a person asks, which is what makes "hidden by default" mean the
- * data is absent from the page rather than merely unrendered.
+ * mode unless `CEZ_HOSTED_ACCOUNTS=1`. Nothing fetches it until a person asks, which is what makes
+ * "hidden by default" mean the data is absent from the page rather than merely unrendered.
  *
  * Rename and Remove live in that same panel rather than on the collapsed row. A row is a reading
  * surface — which account, where, signed in or not — and Remove sitting on it put a destructive
@@ -80,8 +80,9 @@ import { AddAccountDialog } from './add-account-dialog'
  *
  * ## Three decisions worth reading
  *
- * 1. **The discovered account is listed but not editable.** It is what `agentHomePaths()` finds —
- *    which honours the vendors' own env vars — so it is a fact, not a setting.
+ * 1. **The discovered account is listed, and cannot be removed, but can be renamed.** It is what
+ *    `agentHomePaths()` finds — which honours the vendors' own env vars — so which login it is is a
+ *    fact, not a setting; only the name cezar calls it by is cezar's own.
  * 2. **A folder that does not exist yet is not an error.** The documented flow is *add the account
  *    → Connect → the CLI creates the folder*. What must NOT happen is falling back to another
  *    account at run time, and that refusal lives server-side.
@@ -170,7 +171,7 @@ function AccountsPane({ data }: { data: AgentProfilesResponse }) {
             reading surface only — every write, and the per-account probe, answers 409. */}
         {data.manageable ? null : (
           <p data-slot="accounts-readonly" className="mt-1 text-[13px] text-soft-foreground">
-            Account management is off for this cockpit (<code className="text-[12px]">CEZ_HOSTED_ACCOUNTS</code>).
+            Account management is off for this cockpit (<code className="text-[12px]">CEZ_HOSTED_ACCOUNTS=1</code>).
           </p>
         )}
       </div>
@@ -807,7 +808,11 @@ function AccountDetails({
               variant="outline"
               size="sm"
               data-action="account-rename"
-              onClick={() => setRenaming(true)}
+              onClick={() => {
+                // The draft was seeded when this panel mounted; the name may have changed since.
+                setDraft(account.label)
+                setRenaming(true)
+              }}
             >
               Rename
             </Button>

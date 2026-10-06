@@ -1,13 +1,20 @@
 import { ChevronDownIcon } from 'lucide-react'
-import { useId } from 'react'
+import { useEffect, useId, useMemo, type ReactNode } from 'react'
 
 import type { ProjectListEntry } from '@open-mercato/cezar-api-client'
+import { getProjectUiState, putProjectUiState } from '@/api/client'
+import { agentSummary, type AgentSummaryInput } from '@/lib/agent-summary'
 import { BOARD_COLUMNS, BOARD_COLUMN_LABELS, type BoardColumnId } from '@/lib/board-columns'
 import type { Lane, LaneRunInput } from '@/lib/board-lanes'
+import { applyBoardOrder } from '@/lib/board-moves'
 import { Link, scopeTo } from '@/lib/project-router'
 import { cn } from '@/lib/utils'
 
 import { BoardCard, type BoardCardRun } from './board-card'
+import { BoardDnd, ColumnCards, useDropColumn } from './board-dnd'
+import { MovableBoardCard, type AgentLineOptions } from './movable-board-card'
+import type { BoardMoves } from './use-board-moves'
+import { projectUiStateKey, useBoardDrop, useBoardOrder } from './use-board-order'
 
 /**
  * The five-column track every lane body and the sticky column-header row share, so a cell always
@@ -48,13 +55,21 @@ function laneCounts(columns: Record<BoardColumnId, readonly unknown[]>): string 
  *
  * The body is rendered (and `hidden`) even when collapsed, so `aria-controls` always names an
  * element, but it holds no cards until it opens.
+ *
+ * An open lane is its own drag area (spec § Phase 1c → Moving cards, "On All boards"): its cards
+ * reorder and act inside it, through its OWN project's ui-state and project-explicit routes, and
+ * a card dragged out of it has nowhere to land, so it snaps back.
  */
-export function BoardLane<T extends BoardCardRun & LaneRunInput>({
+export function BoardLane<T extends BoardCardRun & LaneRunInput & AgentSummaryInput>({
   lane,
   expanded,
   onToggle,
   now,
   perProjectLimit,
+  bootId,
+  moves,
+  agentLine,
+  dragEnabled,
 }: {
   lane: Lane<ProjectListEntry, T>
   expanded: boolean
@@ -62,12 +77,35 @@ export function BoardLane<T extends BoardCardRun & LaneRunInput>({
   now: number
   /** The runs index's per-project cap — what a truncated lane's notice names. */
   perProjectLimit: number
+  /** The boot project's id: its ui-state lives under the `default`-led cache key. */
+  bootId: string | null
+  moves: BoardMoves
+  agentLine: AgentLineOptions
+  dragEnabled: boolean
 }) {
   const headingId = useId()
   const bodyId = useId()
   const { project } = lane
   const counts = laneCounts(lane.columns)
   const projectBoard = scopeTo(project.id, '/board')
+  // Read only while the lane is open — a collapsed lane shows no cards to order.
+  const order = useBoardOrder({
+    queryKey: projectUiStateKey(project.id, bootId),
+    read: ({ signal }) => getProjectUiState(project.id, { signal }),
+    write: (patch) => putProjectUiState(project.id, patch),
+    enabled: expanded,
+  })
+  const columns = useMemo(() => applyBoardOrder(lane.columns, order.order), [lane.columns, order.order])
+  const drop = useBoardDrop({ columns, order, moves })
+  // A confirmed card now drawn in another column has landed — also while the lane is collapsed,
+  // as it may be once its last active card is done.
+  const { observe } = moves
+  useEffect(() => {
+    observe(project.id, columns)
+  }, [columns, observe, project.id])
+  const renderCard = (run: T, handle: ReactNode, column: BoardColumnId) => (
+    <MovableBoardCard run={run} column={column} handle={handle} now={now} moves={moves} agentLine={agentLine} />
+  )
 
   return (
     <section
@@ -118,9 +156,20 @@ export function BoardLane<T extends BoardCardRun & LaneRunInput>({
         hidden={!expanded}
         className={cn('flex flex-col px-1.5 pb-1.5 md:grid', LANE_GRID_CLASS)}
       >
-        {expanded
-          ? BOARD_COLUMNS.map((id) => <BoardLaneCell key={id} id={id} runs={lane.columns[id]} now={now} />)
-          : null}
+        {expanded ? (
+          <BoardDnd
+            enabled={dragEnabled}
+            onDrop={drop.onDrop}
+            judge={drop.judge}
+            renderOverlay={(card) => (
+              <BoardCard run={card.run} now={now} agent={agentSummary(card.run, agentLine)?.text} overlay />
+            )}
+          >
+            {BOARD_COLUMNS.map((id) => (
+              <BoardLaneCell key={id} laneId={project.id} id={id} runs={columns[id]} renderCard={renderCard} />
+            ))}
+          </BoardDnd>
+        ) : null}
       </div>
     </section>
   )
@@ -132,22 +181,38 @@ export function BoardLane<T extends BoardCardRun & LaneRunInput>({
  * sticky header row; below `md` an empty cell is not drawn at all and a visible label takes the
  * header row's place.
  */
-function BoardLaneCell<T extends BoardCardRun>({ id, runs, now }: { id: BoardColumnId; runs: readonly T[]; now: number }) {
+function BoardLaneCell<T extends BoardCardRun>({
+  laneId,
+  id,
+  runs,
+  renderCard,
+}: {
+  laneId: string
+  id: BoardColumnId
+  runs: readonly T[]
+  renderCard: (run: T, handle: ReactNode, column: BoardColumnId) => ReactNode
+}) {
   const label = BOARD_COLUMN_LABELS[id]
+  const drop = useDropColumn(laneId, id)
   return (
     <div
+      ref={drop.ref}
       role="group"
       data-slot="board-cell"
       data-column={id}
+      data-drop={drop.dropState}
       aria-label={`${label}, ${runs.length} ${runs.length === 1 ? 'task' : 'tasks'}`}
-      className={cn('min-h-10 min-w-0 flex-col gap-2 rounded-md bg-muted p-2', runs.length === 0 ? 'hidden md:flex' : 'flex')}
+      className={cn(
+        'min-h-10 min-w-0 flex-col gap-2 rounded-md bg-muted p-2 transition-shadow',
+        runs.length === 0 ? 'hidden md:flex' : 'flex',
+        drop.dropState === 'valid' && 'ring-2 ring-ring/60',
+        drop.dropState === 'invalid' && 'ring-1 ring-border',
+      )}
     >
       <span aria-hidden="true" className="px-1 text-[12px] font-semibold text-soft-foreground md:hidden">
         {label} · {runs.length}
       </span>
-      {runs.map((run) => (
-        <BoardCard key={run.id} run={run} now={now} />
-      ))}
+      <ColumnCards laneId={laneId} column={id} runs={runs} renderCard={renderCard} />
     </div>
   )
 }
