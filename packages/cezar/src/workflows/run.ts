@@ -58,7 +58,7 @@ import type { QueuedMessage, RunRecord, RunStore, StepState } from '../runs/stor
 // Task dispatch (spec 2026-09-10-dispatch). Every import below is inert unless the feature is
 // ON *and* the run carries a `dispatch`: `dispatchOf()` is the single gate, and a run without one
 // takes byte-for-byte the path it took before this feature existed.
-import type { DispatchInput, DispatchIntent, DispatchReport, RunDispatch } from '@open-mercato/cezar-contract';
+import type { DispatchInput, DispatchIntent, DispatchReport, RunDispatch, SpecialistSnapshot } from '@open-mercato/cezar-contract';
 import { resolveCapabilities } from '../server/capabilities.ts';
 import { composeDispatchPrompt } from '../dispatch/prompts.ts';
 import {
@@ -587,6 +587,8 @@ function formatWakeInstant(at: Date): string {
 
 export interface StartRunInput {
   task: string;
+  /** Workspace specialist definition captured when the assignment is queued. */
+  specialistSnapshot?: SpecialistSnapshot;
   model?: string;
   /** Agent backend chosen for this task (GUI). Unset = the config default. */
   runner?: RunnerId;
@@ -657,6 +659,12 @@ export function composeSystemPrompt(...parts: Array<string | undefined>): string
     .map((p) => p?.trim())
     .filter((p): p is string => Boolean(p))
     .join('\n\n---\n\n');
+}
+
+function specialistPromptPart(snapshot: SpecialistSnapshot | undefined): string | undefined {
+  return snapshot
+    ? `Workspace specialist role: ${snapshot.name}\n\n${snapshot.instructions}`
+    : undefined;
 }
 
 /**
@@ -1245,6 +1253,7 @@ export class RunManager {
       // its commits, and an in-place run has no branch to fork. Overridden on the INPUT, which is
       // what `execute()` reads, not only on the record.
       ...(input.dispatchIntent && input.worktree === false ? { worktree: undefined } : {}),
+      ...(input.specialistSnapshot && !input.dispatch?.parentRunId ? { autonomous: false } : {}),
     };
     const run = this.store.createRun({
       title: makeRunTitle(input.task, workflow) + (group ? ` (${group.variant})` : ''),
@@ -1255,6 +1264,7 @@ export class RunManager {
       // The composer's per-task account (spec 2026-07-29-agent-profiles). Persisted at creation
       // so a queued run picks it up at dequeue and every later resume reads the same answer.
       agentProfile: input.agentProfile,
+      specialistSnapshot: effectiveInput.specialistSnapshot,
       // The global inbox is the ceiling on the per-run flag (#471). Enforced here rather than
       // at the HTTP route because `cezar run`, the inbox's own "▶ Run" and variants all reach
       // startRun directly — a route-level gate would leave those writing todos.json.
@@ -1622,6 +1632,7 @@ export class RunManager {
         // a restart would otherwise resume as an ordinary flat task — no tree, no
         // parent to report to.
         dispatch: run.dispatch,
+        specialistSnapshot: run.specialistSnapshot,
         // Preserve an explicit worktree opt-out across a queued restart.
         worktree: run.worktree,
       }),
@@ -2089,7 +2100,7 @@ export class RunManager {
    * unless the order names others, gets a budget carved out of the parent's, and always runs
    * autonomously — a child parked at `waiting` after every turn would need a human per rung.
    */
-  dispatch(parentId: string, input: DispatchInput): { id: string; branch?: string } | { refused: string } {
+  dispatch(parentId: string, input: DispatchInput, specialistSnapshot?: SpecialistSnapshot): { id: string; branch?: string } | { refused: string } {
     if (!this.dispatchEnabled()) return { refused: 'dispatch is disabled on this cockpit (CEZ_DISPATCH=0) — the operator turned it off. Do not substitute sub-agents or do the delegated work yourself: stop and report that dispatch is disabled.' };
     const parent = this.store.getRun(parentId);
     if (!parent) return { refused: `no such run: ${parentId}` };
@@ -2148,6 +2159,7 @@ export class RunManager {
       // mints it, so the envelope is finished below once it exists.
       task: childTaskEnvelope(input, { id: parentId, branch: parent.branch }, ['{{TREE_PATHS}}']),
       systemPrompt: composeDispatchPrompt(input.kind),
+      ...(specialistSnapshot ? { specialistSnapshot } : {}),
       runner: input.runner ?? intent?.runner ?? parent.runner,
       ...(input.model ?? intent?.model ?? parent.model ? { model: input.model ?? intent?.model ?? parent.model } : {}),
       autonomous: true,
@@ -2923,6 +2935,7 @@ export class RunManager {
     return {
       ...input,
       task,
+      specialistSnapshot: run.specialistSnapshot,
       ...(images.length ? { images } : { images: undefined }),
       ...(stackedImages.length ? { stackedImages } : { stackedImages: undefined }),
     };
@@ -3327,6 +3340,8 @@ export class RunManager {
       /** Agent account for the reopened session (spec 2026-07-29-agent-profiles). Omitted = the
        *  account the run is already on. */
       agentProfile?: string;
+  /** Immutable workspace role instructions resolved by the server before queueing. */
+  specialistSnapshot?: SpecialistSnapshot;
     } = {},
     /** Restart recovery may discover several interrupted tasks at once. Those
      *  continuations are queued; an explicit user Continue remains immediate. */
@@ -3900,6 +3915,7 @@ export class RunManager {
           state.automationsPrompt,
           skillCatalogPart(state.skills),
           record?.systemPrompt,
+          specialistPromptPart(record?.specialistSnapshot),
           generateFollowups ? HANDOFF_INSTRUCTIONS : HANDOFF_ONLY_INSTRUCTIONS,
         ),
         userPrompt: attachments.length
@@ -4822,6 +4838,7 @@ export class RunManager {
             state.automationsPrompt,
             skillCatalogPart(skills, step.skill),
             extraSystemPrompt,
+            specialistPromptPart(input.specialistSnapshot),
             followupsEnabled() && input.generateFollowups !== false
               ? HANDOFF_INSTRUCTIONS
               : HANDOFF_ONLY_INSTRUCTIONS,

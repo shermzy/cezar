@@ -7,7 +7,7 @@ import {
   SquareIcon,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { useParams, useSearchParams } from 'react-router'
+import { useLocation, useParams, useSearchParams } from 'react-router'
 
 import { Link, useNavigate } from '@/lib/project-router'
 
@@ -26,6 +26,7 @@ import {
   useUiState,
   useWorkspaceConfig,
   useWorkflows,
+  useWorkspaceSpecialists,
 } from '@/api/queries'
 import type {
   AttachmentInput,
@@ -110,8 +111,19 @@ import { PlanReview } from './plan-review'
  */
 export function NewTaskRoute() {
   const [search] = useSearchParams()
+  const location = useLocation()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const [specialistId, setSpecialistId] = useState(() => (search.get('specialist') ?? '').trim())
+  const [handoff] = useState(() => {
+    const state = location.state as { specialistHandoff?: unknown } | null
+    const candidate = state?.specialistHandoff
+    if (!candidate || typeof candidate !== 'object') return null
+    const value = candidate as Record<string, unknown>
+    return typeof value.note === 'string' && typeof value.sourceProjectId === 'string' && typeof value.sourceRunId === 'string'
+      ? { note: value.note, sourceProjectId: value.sourceProjectId, sourceRunId: value.sourceRunId }
+      : null
+  })
 
   // The composer's project (multi-project spec, step 3.4). TWO ids, deliberately:
   //  - `urlProjectId` is what the URL names — always a real project, boot included. It is the
@@ -124,6 +136,8 @@ export function NewTaskRoute() {
   const { projectId: urlProjectId } = useParams()
   const draftProjectId = useProjectScope().projectId
   const projects = useProjects()
+  const specialists = useWorkspaceSpecialists(specialistId !== '')
+  const selectedSpecialist = specialists.data?.specialists.find((role) => role.id === specialistId)
 
   // The deep-link params, captured ONCE: the mount effect below strips them from the URL
   // (legacy's `history.replaceState` — the launch key must not survive in history or survive
@@ -150,6 +164,7 @@ export function NewTaskRoute() {
       ...(deepLink.skill !== ''
         ? { source: { source: 'skill', ref: deepLink.skill } as TaskSource }
         : {}),
+      ...(handoff ? { text: handoff.note } : {}),
     }
   })
   useEffect(() => {
@@ -457,6 +472,8 @@ export function NewTaskRoute() {
   }, [notice, sourcesReady]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const submit = async (text: string, images: AttachmentInput[]) => {
+    if (specialistId !== '' && specialists.isPending) throw new Error('Loading the selected specialist…')
+    if (specialistId !== '' && !selectedSpecialist) throw new Error('This specialist is unavailable. Choose another specialist.')
     if (!providersReady || runner === null) {
       throw new Error(
         providers.isPending
@@ -484,8 +501,8 @@ export function NewTaskRoute() {
       }
       return
     }
-    const created = await createRun(
-      buildCreateRunBody({
+    const created = await createRun({
+      ...buildCreateRunBody({
         task: text,
         source,
         model,
@@ -507,7 +524,8 @@ export function NewTaskRoute() {
         todoId: deepLink.todo,
         dispatch,
       }),
-    )
+      ...(specialistId ? { specialistId } : {}),
+    })
     // Remember what was actually run so the next visit preselects it (legacy
     // `saveLastTaskSource`) and float it to the top of the picker next time
     // (recency sort) — fire-and-forget: a failed write only costs the convenience.
@@ -541,8 +559,8 @@ export function NewTaskRoute() {
     if (plan === null || plan.steps.length === 0 || starting || !providersReady || runner === null) return
     setStarting(true)
     try {
-      const created = await createRun(
-        buildPlannedRunBody({
+      const created = await createRun({
+        ...buildPlannedRunBody({
           task: plan.task,
           steps: plan.steps,
           model,
@@ -556,7 +574,8 @@ export function NewTaskRoute() {
           todoId: deepLink.todo, // #374: planning first must not lose the inbox entry
           dispatch,
         }),
-      )
+        ...(specialistId ? { specialistId } : {}),
+      })
       // Run-mode choices live in the current draft; stable defaults come from workspace policy.
       // persisting the forced `false` would overwrite their real preference, so turning
       // CEZ_FOLLOWUPS back on later would silently come up off.
@@ -609,6 +628,21 @@ export function NewTaskRoute() {
           <h1 className="text-lg font-semibold tracking-tight max-md:text-base">
             What should the agent work on?
           </h1>
+          {specialistId !== '' && (
+            <div data-slot="specialist-assignment" className="mt-2 inline-flex max-w-full items-center gap-2 rounded-full border border-border bg-background px-3 py-1 text-xs">
+              <span className="truncate">
+                {specialists.isPending ? 'Loading specialist…' : selectedSpecialist ? `Role: ${selectedSpecialist.name}` : 'Selected specialist unavailable'}
+              </span>
+              <button type="button" className="shrink-0 font-medium underline underline-offset-2" onClick={() => setSpecialistId('')}>
+                Remove
+              </button>
+            </div>
+          )}
+          {handoff && (
+            <p data-slot="specialist-handoff" className="mt-2 text-xs text-muted-foreground">
+              Review the handoff note and source task link below before starting this project task.
+            </p>
+          )}
           {/* Follows the resolved run mode (#793). Printing the isolation promise
               unconditionally made this line false for every run the user opted out of — and
               for a non-git folder, where there is no worktree to opt into. */}
@@ -633,9 +667,13 @@ export function NewTaskRoute() {
           placeholder="Describe a task for the agent — / for skills…"
           ariaLabel="Describe a task for the agent"
           sendAriaLabel={draft.planFirst ? 'Plan task' : 'Start task'}
-          disabled={!providersReady || starting}
+          disabled={!providersReady || starting || (specialistId !== '' && (!selectedSpecialist || specialists.isPending || specialists.isError))}
           disabledReason={
-            providers.isPending
+            specialistId !== '' && specialists.isPending
+              ? 'Loading the selected specialist…'
+              : specialistId !== '' && (!selectedSpecialist || specialists.isError)
+                ? 'The selected specialist is unavailable — remove it or pick another.'
+                : providers.isPending
               ? 'Checking agent providers…'
               : providers.isError
                 ? 'Provider authentication could not be verified.'
