@@ -803,7 +803,7 @@ describe('ubuntu-vps autostart step (dry-run)', () => {
         if (program === 'bash') return { code: 0, stdout: '/usr/local/bin/cezar', stderr: '' };
         if (program === 'systemctl' && args.includes('show-environment')) return { code: 1, stdout: '', stderr: '' };
         if (program === 'sudo') return { code: 0, stdout: '', stderr: '' };
-        if (program === 'cat') return { code: 0, stdout: commands.length === 1 ? 'replacement unit', stderr: '' };
+        if (program === 'cat') return { code: 0, stdout: commands.length === 1 ? 'replacement unit' : '', stderr: '' };
         if (program === 'curl') return { code: 0, stdout: '200', stderr: '' };
         return { code: 0, stdout: '', stderr: '' };
       },
