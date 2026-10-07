@@ -196,6 +196,12 @@ network), reuses an already-healthy instance instead of double-booting, and writ
 
 `CEZ_DRY_RUN=1 npm run dev` still exercises the whole cockpit offline for manual verification.
 
+## GitHub repository workflow
+
+- The writable fork remote is `fork` (`https://github.com/shermzy/cezar.git`); push branches and open pull requests on `shermzy/cezar`.
+- `origin` points to upstream `open-mercato/cezar` and is fetch-only. Never push to upstream unless the user explicitly authorizes it.
+- Open pull requests against `main` in `shermzy/cezar`.
+
 ## Related documents
 
 - `AGENT_PROTOCOL.md` — the agent protocol: the runner seam, the v1 `AgentEvent` + v2 `UiEvent` streams, per-backend mapping, the golden-fixture testing contract, and the checklist for adding a new runner.

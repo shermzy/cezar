@@ -61,6 +61,7 @@ async function boot(
   verify: (req: IncomingMessage) => WsUpgradeVerdict = () => ({ trusted: true }),
   heartbeatMs?: number,
   topicOptions?: TopicOptions,
+  validateAuthSession?: (userId: string, sessionToken: string) => boolean,
 ): Promise<{ base: string; url: string }> {
   const server = createServer((_req, res) => {
     res.statusCode = 404;
@@ -68,7 +69,7 @@ async function boot(
   });
   const hub = createSocketHub(heartbeatMs === undefined ? {} : { heartbeatMs });
   hub.registerTopic('ticker', publisher, topicOptions);
-  hub.attach(server, verify);
+  hub.attach(server, verify, validateAuthSession);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   servers.push(server);
   hubs.push(hub);
@@ -175,6 +176,30 @@ describe('createSocketHub', () => {
     await client.next();
     client.ws.terminate(); // an abrupt vanish, not a close handshake
     await vi.waitFor(() => expect(state.stopped).toBe(1));
+  });
+
+  it('terminates an authenticated socket after its session is revoked', async () => {
+    const { state, publisher } = makeTopic();
+    let sessionValid = true;
+    const { url } = await boot(
+      publisher,
+      () => ({ trusted: true, authUserId: 'owner-1', authSessionToken: 'session-token' }),
+      60_000,
+      undefined,
+      (userId, token) => sessionValid && userId === 'owner-1' && token === 'session-token',
+    );
+    const client = await connect(url);
+
+    client.send({ type: 'subscribe', topic: 'ticker' });
+    await client.next();
+    let leaked = false;
+    client.ws.on('message', () => { leaked = true; });
+    sessionValid = false;
+    state.publish?.({ secret: 'revoked' });
+
+    await vi.waitFor(() => expect(client.ws.readyState).toBe(WebSocket.CLOSED), { timeout: 1_000 });
+    expect(leaked).toBe(false);
+    expect(state.stopped).toBe(1);
   });
 
   it('answers an unknown topic with an error frame and keeps the connection', async () => {

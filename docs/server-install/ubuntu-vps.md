@@ -4,13 +4,14 @@ Host the cezar cockpit on a bare Ubuntu/Debian server, reachable over the
 internet, behind a login and (optionally) HTTPS.
 
 **How it's wired:** cezar itself stays **loopback-bound** (`127.0.0.1:4321`,
-`CEZ_REMOTE=1`). **nginx** is the only public surface — it terminates TLS,
-challenges every request with HTTP Basic-Auth, and proxies to cezar. A systemd
+`CEZ_REMOTE=1`). **nginx** is the public surface — it terminates TLS and
+proxies to cezar. By default it challenges requests with HTTP Basic Auth; an
+operator can replace that challenge with managed Cezar logins. A systemd
 service keeps cezar running and restarts it on boot.
 
 ```
   internet ──HTTPS──► nginx (:443)  ──proxy──►  cezar (127.0.0.1:4321)
-                      basic-auth + Let's Encrypt         systemd service
+                  Basic Auth or Cezar login + TLS      systemd service
 ```
 
 The wizard never escalates silently: **every privileged command is printed**,
@@ -60,14 +61,16 @@ node packages/cezar/dist/index.js server-install --platform ubuntu-vps
 | **Reverse proxy** | Installs **nginx**, writes an `auth_basic` + SSE-safe proxy vhost, creates the **htpasswd** identity file, and — if `ufw` is active — allows `Nginx Full` (ports 80/443). |
 | **Domain + SSL** *(optional)* | Points the vhost's `server_name` at your domain, then runs `certbot --nginx` for a Let's Encrypt certificate with auto-redirect. Skippable — you can add it later. |
 | **Service** | Installs a **systemd** unit (rootless `--user` + linger where possible, else a system unit), **starts cezar now**, enables it on boot, and waits for it to answer on the loopback port. |
-| **Verify** | Confirms an anonymous request is challenged (401) **and** that an authenticated request actually reaches cezar (2xx/3xx) — a real end-to-end check, not just "nginx is up". |
+| **Verify** | Confirms the proxy challenge and that an authenticated request actually reaches cezar (2xx/3xx) — a real end-to-end check, not just "nginx is up". |
 
 ### Setting the cockpit login
 
 During the reverse-proxy step you pick the **username** (defaults to your OS
 user) and a **password** — either type your own or let the installer **generate
 a strong one** (shown once, so save it). This is the HTTP Basic-Auth credential
-you enter in the browser over HTTPS. cezar stores only a hash.
+you enter in the browser over HTTPS. When you enable managed access, create the
+first Cezar owner separately with `cezar auth bootstrap`; accounts are managed
+in Settings → Members.
 
 ### The privileged-command prompt
 
@@ -95,17 +98,42 @@ npx cezar-run server-install --platform ubuntu-vps \
 ```
 
 That installs **the service only** — no nginx, no certbot. Steps run:
-`deps → autostart → identity`. Your proxy terminates TLS and enforces auth.
+`deps → autostart → identity`. Your proxy terminates TLS. Until managed Cezar
+login is enabled and initialized, your proxy must enforce auth.
 
 ```
 internet ──HTTPS──► your proxy (Traefik/Caddy/nginx) ──► cezar (172.17.0.1:4321)
                     TLS + auth are YOURS to configure          systemd service
 ```
 
-> ⚠️ **cezar has no built-in authentication.** In the default install nginx's
-> basic-auth is that gate; with `--external-proxy` there is none, and anyone who
-> can reach the bound host:port can run agents on your box. Put auth on the proxy
-> and keep the port off the public internet (ufw / cloud firewall).
+> ⚠️ Managed Cezar login is off by default. In the default install nginx's
+> Basic Auth is the gate; with `--external-proxy`, the proxy must enforce auth
+> until Cezar login is enabled. Keep the bound host:port off the public internet
+> (ufw / cloud firewall).
+
+### Replace proxy Basic Auth with managed Cezar logins
+
+Keep the existing proxy challenge while you enable and initialize Cezar auth.
+Run these commands as the service account, with the same `CEZ_HOME`:
+
+```bash
+CEZ_AUTH_REQUIRED=1 npx cezar-run server-install --platform ubuntu-vps --reconfigure autostart
+CEZ_AUTH_REQUIRED=1 npx cezar-run auth bootstrap
+CEZ_AUTH_REQUIRED=1 npx cezar-run server-install --platform ubuntu-vps --reconfigure autostart
+```
+
+The first restart enables the auth gate and keeps nginx Basic Auth while no
+owner exists. The final reconfigure verifies the auth session and confirms an
+anonymous owner-only request gets 401 before removing the managed nginx
+challenge; if `nginx -t` or reload fails, the installer restores the previous
+site. For PowerShell, set `$env:CEZ_AUTH_REQUIRED='1'` before running the CLI.
+
+With `--external-proxy`, Cezar never edits the proxy. Keep its Basic Auth until
+an owner can sign in and an anonymous owner-only request returns 401, then
+remove the challenge yourself while preserving TLS. The installer sets
+`CEZ_AUTH_TRUST_PROXY=1` when managed auth is enabled so login limits can use
+the real client address; configure your proxy to **overwrite** `X-Real-IP` with
+that address, and keep the Cezar listener reachable only through the proxy.
 
 ### Which `--bind-host`?
 

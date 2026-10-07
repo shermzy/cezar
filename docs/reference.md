@@ -299,6 +299,8 @@ Useful environment variables:
 |---|---|
 | `CEZ_DRY_RUN=1` | Use the bundled mock instead of the real `claude` CLI — the entire cockpit works offline, for demos and development. |
 | `CEZ_INSTANCE_ID` | Internal server-install identity set automatically in generated systemd/launchd services; normally leave unset. It is surfaced additively by `/api/v1/health` for install verification. |
+| `CEZ_AUTH_REQUIRED=1` | Require managed Cezar logins for every cockpit/API request. Off by default. Persist it in the service launcher and restart before bootstrapping the owner; `server-install` preserves it on reconfigure. Owners manage accounts, project grants, and session revocation in Settings → Members. |
+| `CEZ_AUTH_TRUST_PROXY=1` | Use a validated `X-Real-IP` as the login rate-limit source. Bundled nginx/ngrok installers configure and overwrite this header. For a custom proxy, enable it only when the proxy replaces the header with the actual client IP and the Cezar listener is not reachable around that proxy. |
 | `CEZ_AGENT_MODELS_LOCKED=1` | Globally lock each runner to the model configured in its native Claude/Codex/OpenCode settings while keeping runner selection available. Exact `1` also delegates authentication and provider enablement to those native agents, so Cezar skips its credential probes and provider-disable preferences. Existing Cezar presets are preserved but ignored, and an environment change requires a restart. The config-file equivalent is `"modelsLocked": true` in global `~/.cezar/config.json` or one repository's `.ai/cezar/config.json`; config-file locks do not disable provider checks. |
 | `CEZ_APPROVAL_GATE=1` | Opt into Claude's interactive approval UI; by default, unapproved tools are denied without interrupting the run. |
 | `CEZ_FOLLOWUPS=1` | Turn on the global follow-up **Inbox**: agents are asked to leave follow-ups in `todos.json` when they finish, and the Inbox view appears. Off by default — each task's own **Notes** handoff journal runs either way. |
@@ -484,17 +486,58 @@ npx cezar-run server-install --platform ubuntu-vps \
 
 `--bind-host` is only needed when the proxy runs in a **container** (Traefik
 can't reach the host's loopback); a host-installed proxy uses the `127.0.0.1`
-default. In this mode **your proxy must enforce authentication** — cezar has
-none of its own. [Details →](server-install/ubuntu-vps.md#the-box-already-has-a-reverse-proxy-dokploy-coolify-caddy)
+default. Without `CEZ_AUTH_REQUIRED=1`, **your proxy must enforce
+authentication**. Managed Cezar logins can also protect this service when
+enabled. [Details →](server-install/ubuntu-vps.md#the-box-already-has-a-reverse-proxy-dokploy-coolify-caddy)
 
 | Provider | `--platform` | Public front | Guide |
 |----------|--------------|--------------|-------|
-| Ubuntu / Debian VPS | `ubuntu-vps` | nginx + Let's Encrypt HTTPS, htpasswd login, systemd | [Step-by-step →](server-install/ubuntu-vps.md) |
+| Ubuntu / Debian VPS | `ubuntu-vps` | nginx + Let's Encrypt HTTPS, htpasswd by default or managed Cezar login, systemd | [Step-by-step →](server-install/ubuntu-vps.md) |
 | Ubuntu + existing proxy | `ubuntu-vps --external-proxy` | your Dokploy/Traefik/Caddy front; cezar ships the service only | [Step-by-step →](server-install/ubuntu-vps.md#the-box-already-has-a-reverse-proxy-dokploy-coolify-caddy) |
-| macOS + ngrok | `macosx-ngrok` | ngrok tunnel + `--basic-auth`, launchd | [Step-by-step →](server-install/macosx-ngrok.md) |
+| macOS + ngrok | `macosx-ngrok` | ngrok tunnel + `--basic-auth` by default or managed Cezar login, launchd | [Step-by-step →](server-install/macosx-ngrok.md) |
 
 See the **[Remote access overview](server-install/README.md)** for how it
 works and how to redeploy new versions.
+
+## Managed workspace logins
+
+Managed access is off by default. It adds owner-managed accounts and project
+membership: **Owners** use the full cockpit and manage members; **Viewers** see
+only the run summary for projects the owner shares with them. Agent execution
+remains an owner privilege.
+
+1. Persist `CEZ_AUTH_REQUIRED=1` in the Cezar service launcher and restart it.
+   For a managed Ubuntu/macOS install, set that variable in the shell and run
+   `cezar server-install --reconfigure autostart`; for a custom service, edit
+   its launcher and restart it yourself. Custom reverse proxies must also
+   replace `X-Real-IP` with the connecting client's address; set
+   `CEZ_AUTH_TRUST_PROXY=1` in that launcher only when the Cezar listener is
+   reachable solely through that proxy.
+2. In a local interactive shell using the service account and the same
+   `CEZ_HOME`, run `cezar auth bootstrap` to create the first owner. The auth
+   command also needs `CEZ_AUTH_REQUIRED=1` in its own environment:
+
+   ```bash
+   CEZ_AUTH_REQUIRED=1 cezar auth bootstrap
+   CEZ_AUTH_REQUIRED=1 cezar auth reset-password <username>
+   CEZ_AUTH_REQUIRED=1 cezar auth repair
+   ```
+
+   In PowerShell, use `$env:CEZ_AUTH_REQUIRED='1'` before those commands.
+   `repair` is only for a malformed/unreadable auth store; it backs up that file
+   and replaces it with a new owner, so members and invitations must be created
+   again. For a valid store, use `reset-password`.
+3. Owners invite people from **Settings → Members**, choose their role, and
+   grant viewers access to selected projects. The invitee sets their own
+   username and password through the one-use link.
+
+Keep the existing proxy Basic Auth and TLS during setup. The bundled Ubuntu/nginx
+and macOS/ngrok installers remove their Basic Auth only on a later
+`server-install --reconfigure autostart` after Cezar reports a ready auth store
+and rejects an anonymous owner-only request; a failed proxy reload restores the
+previous config. If you use an external proxy, verify a login and anonymous
+401 first, then remove its Basic Auth manually while keeping TLS. Cezar fails
+closed while the auth store is missing or damaged.
 
 ---
 

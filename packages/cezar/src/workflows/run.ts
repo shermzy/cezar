@@ -60,6 +60,7 @@ import type { QueuedMessage, RunRecord, RunStore, StepState } from '../runs/stor
 // takes byte-for-byte the path it took before this feature existed.
 import type { DispatchInput, DispatchIntent, DispatchReport, RunDispatch, SpecialistSnapshot } from '@open-mercato/cezar-contract';
 import { resolveCapabilities } from '../server/capabilities.ts';
+import { issueRunCapability } from '../server/internal-capabilities.ts';
 import { composeDispatchPrompt } from '../dispatch/prompts.ts';
 import {
   appendLedger,
@@ -1190,6 +1191,9 @@ export class RunManager {
       // is byte-for-byte as before.
       ...(apiUrl ? { CEZ_API_URL: apiUrl } : {}),
       ...(apiUrl && this.projectId ? { CEZ_PROJECT_ID: this.projectId } : {}),
+      ...(apiUrl && this.projectId && process.env.CEZ_AUTH_REQUIRED === '1'
+        ? { CEZ_INTERNAL_CAPABILITY: issueRunCapability(runId, this.projectId)! }
+        : {}),
       // The cockpit's OWN entrypoint, so an agent runs `node "$CEZ_BIN" task …` and never an older
       // `cez` that happens to be on its PATH without the command (observed on the first live run).
       ...(apiUrl && process.env.CEZ_BIN ? { CEZ_BIN: process.env.CEZ_BIN } : {}),
@@ -1229,13 +1233,15 @@ export class RunManager {
     const trackerEnv = association && this.resolveTrackerEnv && process.env.CEZ_DRY_RUN !== '1'
       ? await this.resolveTrackerEnv(this.repoRoot, association)
       : {};
-    const secrets = [trackerEnv.JIRA_API_TOKEN, trackerEnv.LINEAR_API_KEY].filter((value): value is string => Boolean(value));
+    const env = { ...this.agentEnv(runId, options.generateFollowups), ...trackerEnv, ...resolved.env };
+    const secrets = [trackerEnv.JIRA_API_TOKEN, trackerEnv.LINEAR_API_KEY, env.CEZ_INTERNAL_CAPABILITY]
+      .filter((value): value is string => Boolean(value));
     if (trackerEnv.JIRA_EMAIL && trackerEnv.JIRA_API_TOKEN) {
       secrets.push(Buffer.from(`${trackerEnv.JIRA_EMAIL}:${trackerEnv.JIRA_API_TOKEN}`).toString('base64'));
     }
     this.store.registerRunSecrets(runId, secrets);
     return {
-      env: { ...this.agentEnv(runId, options.generateFollowups), ...trackerEnv, ...resolved.env },
+      env,
       profileId: resolved.profile.id,
     };
   }

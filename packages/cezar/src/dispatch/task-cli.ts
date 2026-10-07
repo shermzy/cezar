@@ -13,6 +13,7 @@ export interface TaskCliEnv {
   CEZ_API_URL?: string;
   CEZ_PROJECT_ID?: string;
   CEZ_TASK_ID?: string;
+  CEZ_INTERNAL_CAPABILITY?: string;
 }
 
 export interface TaskCliIo {
@@ -32,11 +33,11 @@ const USAGE = `cez task — dispatch cezar tasks from inside a task (on by defau
   cez task list                       the tree this task belongs to, with status and cost
   cez task tree <run id>              the tree rooted at (or containing) another run`;
 
-function base(env: TaskCliEnv): { url: string; scope: string } | null {
+function base(env: TaskCliEnv): { url: string; scope: string; headers: Record<string, string> } | null {
   const url = env.CEZ_API_URL?.replace(/\/+$/, '');
   if (!url) return null;
   const scope = env.CEZ_PROJECT_ID ? `${url}/api/v1/p/${encodeURIComponent(env.CEZ_PROJECT_ID)}` : `${url}/api/v1`;
-  return { url, scope };
+  return { url, scope, headers: env.CEZ_INTERNAL_CAPABILITY ? { authorization: `Bearer ${env.CEZ_INTERNAL_CAPABILITY}` } : {} };
 }
 
 async function readError(response: Response): Promise<string> {
@@ -118,7 +119,7 @@ export async function runTaskCommand(
         };
         const response = await io.fetch(`${api.scope}/runs/${encodeURIComponent(env.CEZ_TASK_ID)}/dispatch`, {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: { ...api.headers, 'content-type': 'application/json' },
           body: JSON.stringify(body),
         });
         if (!response.ok) throw new Error(`dispatch refused — ${await readError(response)}`);
@@ -158,7 +159,7 @@ export async function runTaskCommand(
         };
         const response = await io.fetch(`${api.scope}/runs/${encodeURIComponent(env.CEZ_TASK_ID)}/report`, {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: { ...api.headers, 'content-type': 'application/json' },
           body: JSON.stringify(body),
         });
         if (!response.ok) throw new Error(`report refused — ${await readError(response)}`);
@@ -169,7 +170,7 @@ export async function runTaskCommand(
       case 'tree': {
         const anchor = command === 'tree' ? rest[0] : env.CEZ_TASK_ID;
         if (!anchor) throw new Error(command === 'tree' ? 'a run id is required' : 'CEZ_TASK_ID is not set');
-        const response = await io.fetch(`${api.scope}/runs`);
+        const response = await io.fetch(`${api.scope}/runs`, { headers: api.headers });
         if (!response.ok) throw new Error(`could not list runs — ${await readError(response)}`);
         const runs = (await response.json()) as Array<{
           id: string;

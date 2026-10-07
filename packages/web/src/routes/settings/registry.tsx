@@ -12,6 +12,7 @@ import {
   NotebookPenIcon,
   PaletteIcon,
   TicketIcon,
+  UsersIcon,
 } from 'lucide-react'
 import type { ComponentType, SVGProps } from 'react'
 
@@ -29,6 +30,7 @@ import { ResourcesSection } from './resources-section'
 import { SkillsSection } from './skills-section'
 import { WorktreesSection } from './worktrees-section'
 import { TrackerSection } from './tracker-section'
+import { MembersSection } from './members'
 
 /**
  * The Settings section registry (R6 Step 1.3, spec §"Settings"): the ONE place a section is
@@ -55,6 +57,7 @@ export type SettingsSectionId =
   | 'resources'
   | 'worktrees'
   | 'projects'
+  | 'members'
   | 'notifications'
   | 'prompt-templates'
   | 'keyboard'
@@ -189,6 +192,14 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     description: 'The workspace registry and where GitHub checkouts land.',
     icon: FoldersIcon,
     component: ProjectsSection,
+    scope: 'global',
+  },
+  {
+    id: 'members',
+    title: 'Members',
+    description: 'Manage workspace logins, invitations and project access.',
+    icon: UsersIcon,
+    component: MembersSection,
     scope: 'global',
   },
   {

@@ -78,7 +78,8 @@ export interface TopicOptions {
  * foreign page on another local port are indistinguishable at the handshake: it
  * may subscribe ONLY to topics a publisher flagged `loopbackReadable`.
  */
-export type WsUpgradeVerdict = false | { trusted: boolean };
+/** `authSessionToken` stays server-side and is revalidated at each heartbeat. */
+export type WsUpgradeVerdict = false | { trusted: boolean; authUserId?: string; authSessionToken?: string };
 
 /** The minimal server surface `attach` needs — satisfied by the `http.Server`
  *  that `@hono/node-server`'s `serve()` returns. */
@@ -97,7 +98,12 @@ export interface SocketHub {
    *  request-origin guard — `false` answers 403 before the handshake, otherwise
    *  its `trusted` flag decides which topics the connection may read. Boot-time
    *  wiring like `registerTopic`: attaching twice throws. */
-  attach(server: UpgradeCapableServer, verifyUpgrade: (req: IncomingMessage) => WsUpgradeVerdict): void;
+  attach(
+    server: UpgradeCapableServer,
+    verifyUpgrade: (req: IncomingMessage) => WsUpgradeVerdict,
+    validateAuthSession?: (userId: string, sessionToken: string) => boolean,
+  ): void;
+  revokeUser(userId: string): void;
   /** Stop publishers, terminate clients, clear timers. Idempotent; also runs
    *  on the attached server's own `close`. */
   close(): void;
@@ -119,6 +125,8 @@ interface ClientState {
   /** The upgrade verdict's trust flag (see `WsUpgradeVerdict`). An untrusted
    *  connection may subscribe only to `loopbackReadable` topics. */
   trusted: boolean;
+  authUserId?: string;
+  authSessionToken?: string;
 }
 
 export interface SocketHubOptions {
@@ -134,10 +142,27 @@ export function createSocketHub(options: SocketHubOptions = {}): SocketHub {
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_PAYLOAD_BYTES });
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let closed = false;
+  let validateAuthSession: ((userId: string, sessionToken: string) => boolean) | undefined;
+
+  const authSessionIsValid = (client: ClientState): boolean => {
+    if (!client.authUserId) return true;
+    try {
+      return Boolean(client.authSessionToken && validateAuthSession?.(client.authUserId, client.authSessionToken));
+    } catch {
+      return false;
+    }
+  };
 
   const send = (ws: WebSocket, frame: unknown): void => {
     // OPEN as the literal 1: the check must hold for any socket implementation.
-    if (ws.readyState === 1) ws.send(JSON.stringify(frame));
+    if (ws.readyState !== 1) return;
+    const client = clients.get(ws);
+    if (client?.authUserId && !authSessionIsValid(client)) {
+      dropClient(ws);
+      ws.terminate();
+      return;
+    }
+    ws.send(JSON.stringify(frame));
   };
 
   const subscribe = (ws: WebSocket, client: ClientState, topic: string): void => {
@@ -185,17 +210,24 @@ export function createSocketHub(options: SocketHubOptions = {}): SocketHub {
     }
   };
 
-  const dropClient = (ws: WebSocket): void => {
+  function dropClient(ws: WebSocket): void {
     const client = clients.get(ws);
     if (!client) return;
     for (const topic of [...client.topics]) unsubscribe(ws, client, topic);
+    delete client.authSessionToken;
     clients.delete(ws);
-  };
+  }
 
-  wss.on('connection', (ws: WebSocket, _req: IncomingMessage, trusted?: boolean) => {
+  wss.on('connection', (ws: WebSocket, _req: IncomingMessage, trusted?: boolean, authUserId?: string, authSessionToken?: string) => {
     // `trusted` is emitted by `attach` from the upgrade verdict; default false is
     // the safe read for any path that reaches here without one.
-    const client: ClientState = { alive: true, topics: new Set(), trusted: trusted === true };
+    const client: ClientState = {
+      alive: true,
+      topics: new Set(),
+      trusted: trusted === true,
+      ...(authUserId ? { authUserId } : {}),
+      ...(authSessionToken ? { authSessionToken } : {}),
+    };
     clients.set(ws, client);
     ws.on('pong', () => {
       client.alive = true;
@@ -242,12 +274,13 @@ export function createSocketHub(options: SocketHubOptions = {}): SocketHub {
       };
     },
 
-    attach(server, verifyUpgrade) {
+    attach(server, verifyUpgrade, sessionValidator) {
       // Boot-time wiring like `registerTopic`, so a second call is a programming
       // error rather than something to absorb: it would install a second
       // `upgrade` listener and orphan the first heartbeat interval (`close`
       // clears only the last one). Throw the same way registration does.
       if (heartbeat !== undefined) throw new Error('ws hub already attached');
+      validateAuthSession = sessionValidator;
       server.on('upgrade', (req, socket, head) => {
         // `req.url` on an upgrade is the request path (+query); the base is
         // only there to satisfy URL parsing of a relative reference.
@@ -266,11 +299,16 @@ export function createSocketHub(options: SocketHubOptions = {}): SocketHub {
         }
         // Carry the verdict's trust flag onto the connection — `subscribe` reads
         // it to gate non-`loopbackReadable` topics.
-        wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req, verdict.trusted));
+        wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req, verdict.trusted, verdict.authUserId, verdict.authSessionToken));
       });
       server.on('close', () => hub.close());
       heartbeat = setInterval(() => {
         for (const [ws, client] of clients) {
+          if (client.authUserId && !authSessionIsValid(client)) {
+            dropClient(ws);
+            ws.terminate();
+            continue;
+          }
           if (!client.alive) {
             // Missed the previous beat's pong — the peer is gone. Terminate (not
             // a polite close, there is nobody to handshake with); 'close' fires
@@ -302,6 +340,14 @@ export function createSocketHub(options: SocketHubOptions = {}): SocketHub {
         ws.terminate();
       }
       wss.close();
+    },
+
+    revokeUser(userId) {
+      for (const [ws, client] of clients) {
+        if (client.authUserId !== userId) continue;
+        dropClient(ws);
+        ws.terminate();
+      }
     },
   };
 

@@ -7,7 +7,7 @@ import { createTrackerService } from './tracker/index.ts';
 import { TrackerWatches } from './tracker/watch.ts';
 import { readTrackerAssociation, writeTrackerAssociation, clearTrackerAssociation } from '../tracker-association.ts';
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { AutomationStore } from '../automations/store.ts';
 import { AutomationCoordinator } from '../automations/coordinator.ts';
 import { GithubPoller } from '../automations/github-poller.ts';
@@ -60,6 +60,7 @@ import {
   updateProjectInputSchema,
 } from '@open-mercato/cezar-contract';
 import { dispatchInputSchema, dispatchIntentSchema, dispatchReportSchema } from '@open-mercato/cezar-contract';
+import type { AuthMember } from '@open-mercato/cezar-contract';
 import {
   specialistCreateSchema,
   specialistIdParamSchema,
@@ -211,6 +212,7 @@ import {
   type ProjectListEntry,
 } from '../workspace/projects.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
+import { authStoreReady, csrfTokenForSession, findSession, AuthStoreError } from '../workspace/auth.ts';
 import { mergeWriteWorkspaceUiState, readWorkspaceUiState } from '../workspace/ui-state.ts';
 import { checkoutRepo, type CloneRunner } from './checkout.ts';
 import { ProjectContextError, ProjectContexts, type ProjectContext } from './project-context.ts';
@@ -221,6 +223,8 @@ import { isLoopbackHostHeader, normalizeHostname, resolveCapabilities } from './
 import { createSocketHub, type SocketHub, type WsUpgradeVerdict } from './ws.ts';
 import { browseDirectory, isInsideBrowseRoot, isLexicallyInsideBrowseRoot, resolveBrowseRoot } from './fs-browse.ts';
 import { parseRemote, resolveForge, type ForgeAvailability } from './forge/index.ts';
+import { authSessionToken, createAuthRoutes } from './auth-api.ts';
+import { allowAutomationCheck, revokeAllInternalCapabilities, verifyInternalCapability } from './internal-capabilities.ts';
 import { fetchGithub, fetchGithubChecks, fetchGithubComments, fetchGithubPrDiff, fetchGithubRefStatus, forgetRefStatus, readCachedRefStatuses, refNumberFromUrl, searchGithubItems, GithubPrNotFoundError, GH_CHECKS_MAX, GH_SEARCH_MAX, GH_REF_STATUS_MAX } from './github.ts';
 import { ensureLaunchKey } from './launch-key.ts';
 import { openInTerminal } from './open-in-terminal.ts';
@@ -1160,6 +1164,49 @@ async function probeWritableDir(dir: string, create: boolean): Promise<string | 
 // with nothing to offer. See the `routed` assembly at the end of the function.
 export function createApp(deps: ServerDeps) {
   const { version, update, bindHost, bootProjectId } = deps;
+  const authenticatedSse = new Map<string, Set<() => void>>();
+  const revokeAuthenticatedSse = (userId: string): void => {
+    for (const revoke of [...(authenticatedSse.get(userId) ?? [])]) revoke();
+  };
+  const managedSseWriter = <Message,>(
+    stream: { writeSSE(message: Message): Promise<void>; abort(): void; onAbort(listener: () => void): void; aborted: boolean },
+    cookie: string | undefined,
+  ): ((message: Message) => Promise<void>) => {
+    if (process.env.CEZ_AUTH_REQUIRED !== '1') return (message) => stream.writeSSE(message);
+    const token = authSessionToken(cookie);
+    let member: ReturnType<typeof findSession>;
+    try { member = token ? findSession(token) : null; } catch { member = null; }
+    if (!token || !member || member.role !== 'owner' || !authStoreReady()) {
+      stream.abort();
+      return async () => {};
+    }
+    const userId = member.id;
+    const connections = authenticatedSse.get(userId) ?? new Set<() => void>();
+    authenticatedSse.set(userId, connections);
+    let registered = true;
+    const unregister = () => {
+      if (!registered) return;
+      registered = false;
+      connections.delete(revoke);
+      if (connections.size === 0) authenticatedSse.delete(userId);
+    };
+    const revoke = () => {
+      unregister();
+      stream.abort();
+    };
+    connections.add(revoke);
+    stream.onAbort(unregister);
+    return async (message) => {
+      if (stream.aborted) return;
+      let current: ReturnType<typeof findSession>;
+      try { current = findSession(token); } catch { current = null; }
+      if (!current || current.id !== userId || current.role !== 'owner' || !authStoreReady()) {
+        revoke();
+        return;
+      }
+      await stream.writeSSE(message);
+    };
+  };
   // Boot singletons keep DELIBERATELY distinct names (`boot*`): every
   // project-scoped handler must resolve its `{store, manager, root, dataDir,
   // launchKey}` from `c.get('project')` — a bare `store`/`repoRoot` in a
@@ -1497,6 +1544,68 @@ export function createApp(deps: ServerDeps) {
     return next();
   });
 
+  app.use('/api/*', async (c, next) => {
+    if (!c.req.path.startsWith(`${V1_PREFIX}/auth/`)) return next();
+    c.header('Cache-Control', 'no-store');
+    c.header('Referrer-Policy', 'no-referrer');
+    return next();
+  });
+
+  // Managed authentication is a durable opt-in. Every protected API defaults to
+  // deny; viewers get one server-filtered summary plus their own session/logout.
+  app.use('/api/*', async (c, next) => {
+    if (process.env.CEZ_AUTH_REQUIRED !== '1' || c.req.path === `${V1_PREFIX}/health`) return next();
+    const path = c.req.path;
+    const publicPost = c.req.method === 'POST' && (path === `${V1_PREFIX}/auth/login` || path === `${V1_PREFIX}/auth/invites/accept`);
+    if (publicPost) {
+      const origin = c.req.header('origin');
+      const host = c.req.header('host');
+      const originHost = hostnameOfOrigin(origin ?? '');
+      const sameOrigin = !!origin && !!host && authorityOfOrigin(origin) === authorityOfHost(host);
+      const devProxy = c.req.header('sec-fetch-site') === 'same-origin' && isLoopbackHostHeader(originHost) && isLoopbackHostHeader(hostnameOfHost(host));
+      if ((!sameOrigin && !devProxy) || c.req.header('sec-fetch-site') === 'cross-site') {
+        return c.json({ error: 'forbidden: sign-in requests must come from this cockpit' }, 403);
+      }
+      return next();
+    }
+    if (path === `${V1_PREFIX}/auth/session` && c.req.method === 'GET') return next();
+
+    const bearer = c.req.header('authorization')?.match(/^Bearer\s+(.+)$/i)?.[1];
+    if (bearer) {
+      const body = MUTATING_METHODS.has(c.req.method) ? await c.req.raw.clone().json().catch(() => undefined) : undefined;
+      if (await verifyInternalCapability(bearer, c.req.method, path, body)) {
+        if (!authStoreReady()) return c.json({ error: 'Managed access is enabled but its store is unavailable. Repair it with the local Cezar auth command.' }, 503);
+        return next();
+      }
+    }
+
+    const token = authSessionToken(c.req.header('cookie'));
+    let member: AuthMember | null;
+    try { member = token ? findSession(token) : null; }
+    catch (error) {
+      if (error instanceof AuthStoreError) return c.json({ error: error.message }, 503);
+      throw error;
+    }
+    if (!member) return c.json({ error: 'authentication required' }, 401);
+
+    if (MUTATING_METHODS.has(c.req.method)) {
+      const expected = Buffer.from(csrfTokenForSession(token));
+      const supplied = Buffer.from(c.req.header('x-cezar-csrf') ?? '');
+      if (expected.length !== supplied.length || !timingSafeEqual(expected, supplied)) {
+        return c.json({ error: 'forbidden: missing or invalid CSRF token' }, 403);
+      }
+    }
+
+    if (member.role === 'viewer') {
+      const viewerRead = c.req.method === 'GET' && path === `${V1_PREFIX}/workspace/viewer-summary`;
+      const sessionRead = c.req.method === 'GET' && path === `${V1_PREFIX}/auth/session`;
+      const logout = c.req.method === 'POST' && path === `${V1_PREFIX}/auth/logout`;
+      if (!viewerRead && !sessionRead && !logout) return c.json({ error: 'owner access required' }, 403);
+    }
+    if (!authStoreReady()) return c.json({ error: 'Managed access is enabled but its store is unavailable. Repair it with the local Cezar auth command.' }, 503);
+    return next();
+  });
+
   // The mirrored project-route table (spec "API Contracts → Project-scoped").
   // Every route below registers ONCE on this sub-app; `createApp` mounts it
   // twice — under `/api/v1/p/:projectId` (scoped) and under `/api/v1` (bound to
@@ -1742,7 +1851,29 @@ export function createApp(deps: ServerDeps) {
   // statement's return value is discarded, so `typeof app` would record nothing
   // and `hc<AppType>` would have no endpoint to offer. `createApp` mounts this
   // under both `/api` (the frozen legacy spelling) and `/api/v1`.
-  const healthRoutes = new Hono().get('/health', async (c) => c.json(await readHealth()));
+  const minimalAuthHealth = () => ({
+    version,
+    repoRoot: basename(bootRoot),
+    repo: null,
+    checks: [],
+    defaultRunner: 'claude' as const,
+    forge: null,
+    capabilities: { localHandoff: false, followups: false, singleProject: false, automations: false, dispatch: false, tokenMetrics: false, tokenUsageMetrics: false, costMetrics: false },
+    projects: [],
+    bootProject: 'default',
+  });
+  const healthRoutes = new Hono().get('/health', async (c) => {
+    if (process.env.CEZ_AUTH_REQUIRED === '1') {
+      try {
+        const token = authSessionToken(c.req.header('cookie'));
+        const member = token ? findSession(token) : null;
+        if (!member || member.role !== 'owner' || !authStoreReady()) return c.json(minimalAuthHealth());
+      } catch {
+        return c.json(minimalAuthHealth());
+      }
+    }
+    return c.json(await readHealth());
+  });
 
   // The push twin of the poll it replaced (#369): while at least one cockpit
   // holds the `health` topic the server re-reads the snapshot on the old 5 s
@@ -3893,6 +4024,7 @@ export function createApp(deps: ServerDeps) {
       const check: ManualCheck = { id, automationId: automation.id, mode: parsed.data.mode, status: 'queued', createdAt: new Date().toISOString() };
       if (manualChecks.size >= 200) manualChecks.delete(manualChecks.keys().next().value!);
       manualChecks.set(id, check);
+      allowAutomationCheck(c.req.header('authorization')?.match(/^Bearer\s+(.+)$/i)?.[1], id);
       void (async () => {
         check.status = 'running';
         try {
@@ -5362,6 +5494,7 @@ export function createApp(deps: ServerDeps) {
         Number.isSafeInteger(lastEventId) && lastEventId >= 0 ? lastEventId : 0,
       );
       return streamSSENoBuffer(c, async (stream) => {
+        const writeSse = managedSseWriter(stream, c.req.header('cookie'));
         let replaying = true;
         let maxSeq = requestedAfter;
         const buffered: RunEvent[] = [];
@@ -5373,7 +5506,7 @@ export function createApp(deps: ServerDeps) {
         // ride `ui-event`, which only v2-aware clients subscribe to.
         // EventSource ignores names it has no listener for.
         const writeEvent = (event: RunEvent) =>
-          stream.writeSSE({
+          writeSse({
             id: String(event.seq),
             event: isV2WireEventType(event.type) ? 'ui-event' : 'run-event',
             data: JSON.stringify(event),
@@ -5385,7 +5518,7 @@ export function createApp(deps: ServerDeps) {
         };
         const onRun = (run: RunRecord) => {
           if (run.id !== id) return;
-          void stream.writeSSE({ event: 'run', data: JSON.stringify(run) });
+          void writeSse({ event: 'run', data: JSON.stringify(run) });
         };
         store.on('event', onEvent);
         store.on('run', onRun);
@@ -5408,10 +5541,10 @@ export function createApp(deps: ServerDeps) {
           if (event.seq > maxSeq) await writeEvent(event);
         }
         const run = store.getRun(id);
-        if (run) await stream.writeSSE({ event: 'run', data: JSON.stringify(run) });
+        if (run) await writeSse({ event: 'run', data: JSON.stringify(run) });
 
         while (!stream.aborted) {
-          await stream.writeSSE({ event: 'ping', data: '' });
+          await writeSse({ event: 'ping', data: '' });
           await stream.sleep(15_000);
         }
       });
@@ -5426,15 +5559,16 @@ export function createApp(deps: ServerDeps) {
     .get('/events', (c) => {
       const { dataDir, store } = c.get('project');
       return streamSSENoBuffer(c, async (stream) => {
-        const onRun = (run: RunRecord) => void stream.writeSSE({ event: 'run', data: JSON.stringify(run) });
+        const writeSse = managedSseWriter(stream, c.req.header('cookie'));
+        const onRun = (run: RunRecord) => void writeSse({ event: 'run', data: JSON.stringify(run) });
         const onDeleted = (id: string) =>
-          void stream.writeSSE({
+          void writeSse({
             event: 'run-deleted',
             data: JSON.stringify({ id }),
           });
         const sendTodos = async () => {
           const items: TodoItem[] = await readTodos(dataDir).catch(() => []);
-          await stream.writeSSE({ event: 'todos', data: JSON.stringify(items) });
+          await writeSse({ event: 'todos', data: JSON.stringify(items) });
         };
         // Opt-in inbox (#471): subscribing is what creates this project's
         // watcher (step 2.3), so with the capability off we never subscribe —
@@ -5453,7 +5587,7 @@ export function createApp(deps: ServerDeps) {
           for (const [runId, sample] of Object.entries(usage)) {
             if (store.getRun(runId)) owned[runId] = sample;
           }
-          void stream.writeSSE({ event: 'usage', data: JSON.stringify(owned) });
+          void writeSse({ event: 'usage', data: JSON.stringify(owned) });
         });
         store.on('run', onRun);
         store.on('deleted', onDeleted);
@@ -5464,7 +5598,7 @@ export function createApp(deps: ServerDeps) {
           offUsage();
         });
         while (!stream.aborted) {
-          await stream.writeSSE({ event: 'ping', data: '' });
+          await writeSse({ event: 'ping', data: '' });
           await stream.sleep(15_000);
         }
       });
@@ -5474,6 +5608,7 @@ export function createApp(deps: ServerDeps) {
   const workspaceEventsRoutes = new Hono<ProjectApiEnv>()
     .get('/workspace/events', (c) => {
       return streamSSENoBuffer(c, async (stream) => {
+        const writeSse = managedSseWriter(stream, c.req.header('cookie'));
         // One detach bundle per attached project — the id guard makes a double
         // attach (connect-time snapshot vs. the built hook) impossible.
         const attached = new Map<string, { store: RunStore; detach: () => void }>();
@@ -5481,18 +5616,18 @@ export function createApp(deps: ServerDeps) {
           if (attached.has(project)) return;
           const { store, dataDir } = ctx;
           const onRun = (run: RunRecord) =>
-            void stream.writeSSE({
+            void writeSse({
               event: 'run',
               data: JSON.stringify({ ...run, project }),
             });
           const onDeleted = (id: string) =>
-            void stream.writeSSE({
+            void writeSse({
               event: 'run-deleted',
               data: JSON.stringify({ id, project }),
             });
           const sendTodos = async () => {
             const items: TodoItem[] = await readTodos(dataDir).catch(() => []);
-            await stream.writeSSE({
+            await writeSse({
               event: 'todos',
               data: JSON.stringify({ project, items }),
             });
@@ -5537,7 +5672,7 @@ export function createApp(deps: ServerDeps) {
               if (store.getRun(runId)) owned[runId] = sample;
             }
             if (Object.keys(owned).length > 0) {
-              void stream.writeSSE({
+              void writeSse({
                 event: 'usage',
                 data: JSON.stringify({
                   project, usage: owned, sentAt: new Date().toISOString(),
@@ -5568,7 +5703,7 @@ export function createApp(deps: ServerDeps) {
               attached.delete(removed);
             }
           }
-          void stream.writeSSE({ event, data: JSON.stringify(data) });
+          void writeSse({ event, data: JSON.stringify(data) });
         });
 
         stream.onAbort(() => {
@@ -5580,7 +5715,7 @@ export function createApp(deps: ServerDeps) {
         });
 
         while (!stream.aborted) {
-          await stream.writeSSE({ event: 'ping', data: '' });
+          await writeSse({ event: 'ping', data: '' });
           await stream.sleep(15_000);
         }
       });
@@ -6542,9 +6677,54 @@ export function createApp(deps: ServerDeps) {
   });
   deps.onDispose?.(() => { offDashboardRegistry(); dashboard.dispose(); });
 
+  const membershipProjects = async () => {
+    let registry = await loadWorkspaceConfig();
+    if (registry.projects.some((project) => !project.entryId)) {
+      await mergeWriteWorkspaceConfig(() => {});
+      registry = await loadWorkspaceConfig();
+    }
+    return registry.projects.flatMap((project) => project.entryId
+      ? [{ entryId: project.entryId, id: project.id, name: project.name || basename(project.root) }]
+      : []);
+  };
+  const authRoutes = createAuthRoutes({
+    membershipProjects,
+    revokeUser: (userId) => {
+      deps.socketHub?.revokeUser(userId);
+      revokeAuthenticatedSse(userId);
+    },
+    revokeCapabilities: revokeAllInternalCapabilities,
+    viewerProjects: async (member) => {
+      const granted = new Set(member.projectEntryIds);
+      if (granted.size === 0) return [];
+      const registry = await loadWorkspaceConfig();
+      const registered = registry.projects.filter((project) => project.entryId && granted.has(project.entryId));
+      const projectRows = await listProjects().catch(() => []);
+      const stateById = new Map(projectRows.map((project) => [project.id, project.status]));
+      return registered.map((project) => {
+        const state = stateById.get(project.id) ?? 'missing';
+        const runs = state === 'missing' ? [] : readRunIndexFromDisk(join(project.root, '.ai/cezar'));
+        const recent = runs.sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 50);
+        return {
+          id: project.id,
+          name: project.name || basename(project.root),
+          state,
+          recentRuns: {
+            total: runs.length,
+            active: recent.filter((run) => ['queued', 'running', 'waiting'].includes(run.status)).length,
+            completed: recent.filter((run) => ['done', 'review'].includes(run.status)).length,
+            failed: recent.filter((run) => run.status === 'failed').length,
+            latestAt: recent[0]?.createdAt ?? null,
+          },
+        };
+      });
+    },
+  });
+
   // Workspace-level families answer for the whole workspace, so they are single-mount: never a
   // project-scoped spelling, which would be a second surface to protect with no consumer.
   const workspaceV1 = new Hono()
+    .route('/', authRoutes)
     .route('/', healthRoutes)
     .route('/', modelsRoutes)
     .route('/', providersRoutes)
@@ -6737,7 +6917,24 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
     }).catch(() => undefined);
   });
   server.once('close', () => { for (const cleanup of appCleanups) cleanup(); unsubscribe(); coordinator.stop(); automationScheduler.stop(); });
-  socketHub.attach(server, (req) => verifyWsUpgrade(req, deps.bindHost));
+  socketHub.attach(server, (req) => {
+    const verdict = verifyWsUpgrade(req, deps.bindHost);
+    if (!verdict || process.env.CEZ_AUTH_REQUIRED !== '1') return verdict;
+    try {
+      const token = authSessionToken(typeof req.headers.cookie === 'string' ? req.headers.cookie : undefined);
+      const member = token ? findSession(token) : null;
+      return member?.role === 'owner' && authStoreReady() ? { ...verdict, authUserId: member.id, authSessionToken: token } : false;
+    } catch {
+      return false;
+    }
+  }, (userId, token) => {
+    try {
+      const member = findSession(token);
+      return member?.id === userId && member.role === 'owner' && authStoreReady();
+    } catch {
+      return false;
+    }
+  });
   return server;
 }
 

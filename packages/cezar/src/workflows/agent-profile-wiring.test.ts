@@ -87,6 +87,31 @@ describe('RunManager agent-profile resolution', () => {
     expect(store.appendEvent(run.id, { type: 'note', message: `synthetic-private-value Basic ${basic}` }).message).toBe('[REDACTED] Basic [REDACTED]');
   });
 
+  it('redacts the run-scoped internal capability before agent output is persisted', async () => {
+    const envNames = ['CEZ_API_URL', 'CEZ_DISPATCH', 'CEZ_AUTH_REQUIRED', 'CEZ_REDACT_SECRETS'] as const;
+    const saved = new Map(envNames.map((name) => [name, process.env[name]] as const));
+    process.env.CEZ_API_URL = 'http://127.0.0.1:4312';
+    process.env.CEZ_DISPATCH = '1';
+    process.env.CEZ_AUTH_REQUIRED = '1';
+    process.env.CEZ_REDACT_SECRETS = '1';
+    try {
+      manager = new RunManager(store, repoRoot, { projectId: 'project-one' });
+      const run = newRun();
+      const { env } = await seam().agentEnvForStep(run.id, 'claude');
+      const token = env.CEZ_INTERNAL_CAPABILITY;
+      expect(token).toBeTruthy();
+
+      const event = store.appendEvent(run.id, { type: 'note', message: token! });
+      expect(event.message).toBe('[REDACTED]');
+      expect(event.message).not.toContain(token!);
+    } finally {
+      for (const [name, value] of saved) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
   it('does not swallow binding failures on the step and continuation seam', async () => {
     manager = new RunManager(store, repoRoot, { resolveTrackerEnv: async () => { throw new Error('connection changed'); } });
     const run = newRun();
