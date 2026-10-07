@@ -13,7 +13,7 @@ import { MAX_REF } from './task-refs.ts';
 import { workflowDefSchema } from '../workflows/types.ts';
 // A contract VALUE, like `workspaceUiStateSchema` in `workspace/migrations.ts`: the persisted
 // `dispatch` object and its wire half are literally the same schema, so they cannot drift.
-import { dispatchSchema, specialistSnapshotSchema, trackerAssociationSchema, trackerAutomationEventSchema } from '@open-mercato/cezar-contract';
+import { deliveryRecordSchema, dispatchSchema, specialistSnapshotSchema, trackerAssociationSchema, trackerAutomationEventSchema } from '@open-mercato/cezar-contract';
 
 import { RUNNER_IDS } from '../core/agent-runner.ts';
 
@@ -244,6 +244,8 @@ export const runRecordSchema = z.object({
    *  a `dispatch` that no longer fits must drop the FIELD, never the whole index. The run then reads
    *  as an ordinary flat task — degraded, but running. */
   dispatch: dispatchSchema.optional().catch(undefined),
+  /** Explicit read-only delivery tracking; malformed additive state degrades to absent. */
+  delivery: deliveryRecordSchema.optional().catch(undefined),
   status: z.enum(['queued', 'running', 'waiting', 'review', 'done', 'failed', 'cancelled']),
   /** Sub-state of `running` (spec 2026-07-18-subagent-monitoring-status, #490):
    *  `monitoring` while the agent is still working on its own downstream work.
@@ -670,6 +672,65 @@ function legacyPrRefs(run: RunRecord): RunPrRef[] {
   return refs;
 }
 
+const AUTHORITATIVE_PR_ORIGINS = new Set<RunPrRef['origin']>(['created', 'marker', 'legacy']);
+
+/** The PR associations delivery evidence is allowed to observe. Derived numbers from task text
+ * remain display-only. The marker fallback keeps older records whose persisted ref list predates
+ * `markerRefs.pr` compatible with the same provenance rules as `legacyPrRefs`. */
+export function authoritativePrRefs(run: RunRecord): RunPrRef[] {
+  const source = run.prRefs && run.prRefs.length > 0 ? run.prRefs : legacyPrRefs(run);
+  const refs = source
+    .filter((ref) => AUTHORITATIVE_PR_ORIGINS.has(ref.origin))
+    .map((ref) => ({ ...ref }));
+  const marker = run.markerRefs?.pr;
+  if (marker !== undefined && Number.isInteger(marker) && marker > 0 && marker < MAX_REF) {
+    const markerUrl = refUrlNumber(run.referencedPullRequestUrl) === marker
+      ? run.referencedPullRequestUrl
+      : undefined;
+    const existingMarker = refs.find((ref) => ref.origin === 'marker' && ref.number === marker);
+    if (existingMarker && markerUrl && !existingMarker.url) existingMarker.url = markerUrl;
+    else if (!refs.some((ref) => ref.number === marker)) {
+      refs.push({
+        number: marker,
+        ...(markerUrl ? { url: markerUrl } : {}),
+        origin: 'marker',
+        at: run.createdAt,
+      });
+    }
+  }
+  if (refs.length === 0) {
+    const created = refUrlNumber(run.pullRequestUrl);
+    if (created !== undefined) refs.push({ number: created, url: run.pullRequestUrl, origin: 'created', at: run.createdAt });
+  }
+  const byNumber = new Map<number, RunPrRef>();
+  for (const ref of refs) if (!byNumber.has(ref.number)) byNumber.set(ref.number, ref);
+  return [...byNumber.values()];
+}
+
+/** Stable association identity shared by delivery refresh and store invalidation. */
+export function prAssociationSignature(run: RunRecord): string {
+  const tokens = authoritativePrRefs(run).map((ref) => `${ref.number}:${ref.url ?? ''}`);
+  const marker = run.markerRefs?.pr;
+  if (marker !== undefined) {
+    const markerUrl = Number.isInteger(marker) && marker > 0 && marker < MAX_REF && refUrlNumber(run.referencedPullRequestUrl) === marker
+      ? run.referencedPullRequestUrl
+      : '';
+    tokens.push(`marker:${marker}:${markerUrl}`);
+  }
+  return tokens.sort().join('|');
+}
+
+function invalidateDeliveryAfterAssociationChange(run: RunRecord, before: string): void {
+  if (!run.delivery || prAssociationSignature(run) === before) return;
+  run.delivery = {
+    ...run.delivery,
+    status: 'unknown',
+    checkedAt: new Date().toISOString(),
+    stale: true,
+    reason: 'Authoritative pull request association changed; refresh delivery evidence.',
+  };
+}
+
 function primaryPrRef(refs: RunPrRef[]): RunPrRef | undefined {
   return refs.reduce<RunPrRef | undefined>((best, ref) =>
     !best || PR_REF_RANK[ref.origin] < PR_REF_RANK[best.origin] ? ref : best,
@@ -1024,6 +1085,7 @@ export class RunStore extends EventEmitter {
   updateRun(id: string, patch: Partial<Omit<RunRecord, 'id' | 'steps'>>): RunRecord | undefined {
     const run = this.runs.get(id);
     if (!run) return undefined;
+    const associationBefore = prAssociationSignature(run);
     if (Object.prototype.hasOwnProperty.call(patch, 'issueNumber')) {
       delete run.referencedIssueNumberSeeded;
     }
@@ -1066,6 +1128,7 @@ export class RunStore extends EventEmitter {
     if (normalized.prNumber !== undefined) {
       appendPrRefToRun(run, { number: normalized.prNumber, origin: 'derived' });
     }
+    invalidateDeliveryAfterAssociationChange(run, associationBefore);
     this.touch(run);
     return run;
   }
@@ -1437,6 +1500,7 @@ export class RunStore extends EventEmitter {
   applyMarkerRefs(runId: string, refs: { pr?: number; issue?: number }): RunRecord | undefined {
     const run = this.runs.get(runId);
     if (!run || (refs.pr === undefined && refs.issue === undefined)) return run;
+    const associationBefore = prAssociationSignature(run);
     run.markerRefs = {
       ...run.markerRefs,
       ...(refs.pr !== undefined ? { pr: refs.pr } : {}),
@@ -1465,6 +1529,7 @@ export class RunStore extends EventEmitter {
         this.repoHandle,
       );
     }
+    invalidateDeliveryAfterAssociationChange(run, associationBefore);
     this.touch(run);
     return run;
   }
@@ -1473,7 +1538,11 @@ export class RunStore extends EventEmitter {
   recordPrRef(runId: string, ref: Omit<RunPrRef, 'at'> & { at?: string }): RunRecord | undefined {
     const run = this.runs.get(runId);
     if (!run || !Number.isInteger(ref.number) || ref.number <= 0 || ref.number >= MAX_REF) return run;
-    if (appendPrRefToRun(run, ref)) this.touch(run);
+    const associationBefore = prAssociationSignature(run);
+    if (appendPrRefToRun(run, ref)) {
+      invalidateDeliveryAfterAssociationChange(run, associationBefore);
+      this.touch(run);
+    }
     return run;
   }
 

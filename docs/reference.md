@@ -63,6 +63,12 @@ Five moves that make the cockpit worth the browser tab:
 - 🛡️ **Review gate.** A finished run with changes waits in `review`. Read the diff,
   type notes that go straight back into the agent's session, or push a
   `gh pr create --draft`. You stay the merge button.
+- **Delivery tracking.** In a task with an associated PR, choose **Track delivery**
+  to save its merge state and integration CI evidence separately from the coding
+  run's status. **Refresh delivery** checks GitHub again. Observed integration CI
+  passes only when successful push workflows match the merged commit and target branch;
+  missing or unreadable evidence stays unknown. Tracking survives a restart,
+  makes no merge or deployment, and does not claim the change has been released.
 - 📱 **Runs on your coding server, drives from your pocket.** The cockpit is a
   responsive web app streaming over SSE, so the box running cezar can be a
   **VPS, cloud, or dedicated server** you never sit in front of. Point a browser

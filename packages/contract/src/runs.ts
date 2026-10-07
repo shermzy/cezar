@@ -9,6 +9,7 @@ import { workflowDefSchema, workflowStepDefSchema } from './workflows.ts';
 // `contract-parity.runs.test.ts` cannot drift apart by construction.
 import { dispatchIntentSchema, dispatchSchema } from './dispatch.ts';
 import { specialistRunIdentitySchema, specialistSnapshotSchema } from './specialists.ts';
+import { deliveryRecordSchema } from './delivery.ts';
 
 /**
  * The RUNS family of `/api/v1` — a task's record, its lifecycle mutations, and the artifacts
@@ -218,6 +219,8 @@ export const runRecordSchema = z.object({
    * always has.
    */
   dispatch: dispatchSchema.optional(),
+  /** User-started read-only delivery tracking; independent from `status`. */
+  delivery: deliveryRecordSchema.optional(),
   status: runStatusSchema,
   /** `monitoring` while `status === 'running'` and the agent is working on downstream work.
    *  Absent on old runs; cleared on resume/end. */

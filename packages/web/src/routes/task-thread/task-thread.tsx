@@ -37,6 +37,7 @@ import { SkillsDock } from './skills-dock'
 import { collectSkills, collectSubagents, findSubagent, subagentChildren } from './subagent-dock'
 import { SubagentSheet } from './subagent-sheet'
 import { AcceptCelebration, ReviewPanel } from './review-panel'
+import { DeliveryPanel } from './delivery-panel'
 import { queuePosition } from './run-actions'
 import { RunHeader } from './run-header'
 import { AskCard } from './ask-card'
@@ -407,6 +408,7 @@ export function ThreadView({
             auto-merges. The panel exists exactly while the run rests at `review`. */}
         {/* Send back carries the drafted line comments, like the composer does. */}
         {run.status === 'review' ? <ReviewPanel run={run} diffComments={diffComments} /> : null}
+        <DeliveryPanel run={run} />
       </div>
 
       <AcceptCelebration status={run.status} />

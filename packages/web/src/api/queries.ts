@@ -39,6 +39,7 @@ import {
   getRepoChanges,
   getRepoCommit,
   getRun,
+  getRunDelivery,
   getRunChanges,
   getRunDiff,
   getRunDrafts,
@@ -73,6 +74,7 @@ import {
   editQueuedMessage,
   markRunSeen,
   markRunUnseen,
+  refreshRunDelivery,
   patchRun,
   pinProjectRun,
   pinRun,
@@ -120,6 +122,8 @@ import type {
   TrackerItemsResponse,
   TrackerKind,
   UpdateChannel,
+  DeliveryGetResponse,
+  DeliveryRefreshResponse,
 } from '@open-mercato/cezar-api-client'
 import { subscribeTopic } from './ws'
 
@@ -172,6 +176,7 @@ export const queryKeys = {
     changes: (id: string) => [queryScope(), 'runs', 'changes', id] as const,
     file: (id: string, path: string) => [queryScope(), 'runs', 'files', id, path] as const,
     handoff: (id: string) => [queryScope(), 'runs', 'handoff', id] as const,
+    delivery: (id: string) => [queryScope(), 'runs', 'delivery', id] as const,
     /** Unsent drafts for one task (#939). Read once per visit and never refetched in the
      *  background — see `useRunDrafts`. */
     drafts: (id: string) => [queryScope(), 'runs', 'drafts', id] as const,
@@ -1033,6 +1038,45 @@ export function useRun(id: string | undefined) {
   return useQuery({
     ...runQueryOptions(id ?? ''),
     enabled: Boolean(id),
+  })
+}
+
+/** Stored-only delivery state. Its five-minute cache follows the cockpit's no-polling rule;
+ * refresh is a separate explicit mutation below. */
+export function useRunDelivery(id: string | undefined) {
+  // A retry can run after navigation; keep its request in the cache entry's project.
+  const projectId = queryScope()
+  return useQuery<DeliveryGetResponse>({
+    queryKey: queryKeys.runs.delivery(id ?? ''),
+    queryFn: ({ signal }) => getRunDelivery(id as string, { signal }, projectId),
+    enabled: Boolean(id),
+  })
+}
+
+/** Start or reconcile one delivery record. The response is authoritative for this cache entry. */
+export function useRefreshRunDelivery(id: string) {
+  const queryClient = useQueryClient()
+  type DeliveryCacheKeys = {
+    delivery: ReturnType<typeof queryKeys.runs.delivery>
+    detail: ReturnType<typeof queryKeys.runs.detail>
+  }
+  type DeliveryMutationInput = { projectId: string }
+  return useMutation<DeliveryRefreshResponse, Error, DeliveryMutationInput>({
+    mutationFn: async ({ projectId }) => {
+      // Capture both the request scope and cache keys before awaiting the POST. The route can
+      // change while a refresh is in flight; reading queryScope() after it settles would write
+      // another project's record under this run id.
+      const keys: DeliveryCacheKeys = {
+        delivery: [projectId, 'runs', 'delivery', id],
+        detail: [projectId, 'runs', 'detail', id],
+      }
+      const delivery = await refreshRunDelivery(id, projectId)
+      queryClient.setQueryData(keys.delivery, delivery)
+      queryClient.setQueryData<RunRecord>(keys.detail, (run) =>
+        run ? { ...run, delivery } : run,
+      )
+      return delivery
+    },
   })
 }
 

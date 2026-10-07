@@ -1,0 +1,47 @@
+{
+  "checkedAt": "2026-10-06T03:28:01.972Z",
+  "result": {
+    "available": true,
+    "repository": {
+      "host": "github.com",
+      "owner": "open-mercato",
+      "name": "cezar",
+      "url": "https://github.com/open-mercato/cezar"
+    },
+    "prs": [
+      {
+        "number": 1290,
+        "url": "https://github.com/open-mercato/cezar/pull/1290",
+        "state": "merged",
+        "mergeable": "unknown",
+        "baseRef": "main",
+        "mergeCommitSha": "02634469333fa565d3a7a1ce50a723fbb40c344d"
+      }
+    ],
+    "checks": [
+      {
+        "workflow": "CodeQL",
+        "runId": 37383236047,
+        "runAttempt": 1,
+        "sha": "02634469333fa565d3a7a1ce50a723fbb40c344d",
+        "branch": "main",
+        "event": "push",
+        "status": "completed",
+        "conclusion": "success",
+        "url": "https://github.com/open-mercato/cezar/actions/runs/37383236047"
+      },
+      {
+        "workflow": "CI",
+        "runId": 37383236169,
+        "runAttempt": 1,
+        "sha": "02634469333fa565d3a7a1ce50a723fbb40c344d",
+        "branch": "main",
+        "event": "push",
+        "status": "completed",
+        "conclusion": "success",
+        "url": "https://github.com/open-mercato/cezar/actions/runs/37383236169"
+      }
+    ]
+  },
+  "wrongRepositoryRejected": true
+}
