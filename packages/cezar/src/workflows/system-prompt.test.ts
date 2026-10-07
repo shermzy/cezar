@@ -282,9 +282,9 @@ describe('systemPrompt end-to-end (dry run)', () => {
     const prompt = capturedSystemPrompt();
     expect(prompt).toContain('node "$CEZ_BIN" automation');
     expect(prompt).toContain(CONFIG_PROMPT);
-    // Dispatch is off; catalog and automations precede the extra prompt and handoff contract.
+    // Dispatch is off; automations and catalog precede the extra prompt and handoff contract.
     expect(prompt).toBe(
-      composeSystemPrompt(availableSkillsPrompt(), AUTOMATIONS_PROMPT, CONFIG_PROMPT, HANDOFF_INSTRUCTIONS),
+      composeSystemPrompt(AUTOMATIONS_PROMPT, availableSkillsPrompt(), CONFIG_PROMPT, HANDOFF_INSTRUCTIONS),
     );
   });
 
