@@ -517,48 +517,59 @@ describe('ubuntu-vps identity verification (#1008)', () => {
   });
 
   function identityCtx(healthOutput: string) {
+    const previousHome = process.env.CEZ_HOME;
+    const authHome = mkdtempSync(join(tmpdir(), 'cez-unmanaged-identity-'));
+    process.env.CEZ_HOME = authHome;
     const messages: string[] = [];
-    let curl = 0;
-    const runner: Runner = {
-      capture: async (program) => {
-        if (program !== 'curl') return { code: 0, stdout: '', stderr: '' };
-        curl++;
-        if (curl === 1) return { code: 0, stdout: '200', stderr: '' };
-        if (curl === 2) return { code: 0, stdout: '401', stderr: '' };
-        if (curl === 3) return { code: 0, stdout: '200', stderr: '' };
-        return { code: 0, stdout: healthOutput, stderr: '' };
-      },
-      interactive: async () => 0,
-    };
-    const ctx = ctxWith({ runner, ui: { ...createAutoUi(), success: (m: string) => messages.push(m), warn: (m: string) => messages.push(m) }, state: { instanceId: 'this-install' } });
-    ctx.prefs = { cockpit: { user: 'ops', password: 'password' } };
-    return { ctx, messages };
-  }
-
-  it('rejects a different cezar instance answering on the expected port', async () => {
     const errors: string[] = [];
-    const ui = { ...createAutoUi(), error: (message: string) => errors.push(message) } as Ui;
-    let curl = 0;
     const runner: Runner = {
       capture: async (program, args) => {
         if (program !== 'curl') return { code: 0, stdout: '', stderr: '' };
-        curl++;
-        if (curl === 1) return { code: 0, stdout: '200', stderr: '' }; // upstream
-        if (curl === 2) return { code: 0, stdout: '401', stderr: '' }; // anonymous proxy
-        if (curl === 3) return { code: 0, stdout: '200', stderr: '' }; // authenticated reach
-        return { code: 0, stdout: '{"instanceId":"other-install"}\n200', stderr: '' };
+        const url = args.find((arg) => arg.startsWith('http://') || arg.startsWith('https://')) ?? '';
+        if (url.endsWith('/api/v1/auth/session') || url.endsWith('/api/v1/projects')) {
+          return { code: 0, stdout: '401', stderr: '' };
+        }
+        if (url.endsWith('/api/v1/health')) return { code: 0, stdout: healthOutput, stderr: '' };
+        return { code: 0, stdout: '200', stderr: '' };
       },
       interactive: async () => 0,
     };
-    const ctx = ctxWith({ ui, runner, state: { instanceId: 'this-install' } });
+    const ctx = ctxWith({ runner, ui: {
+      ...createAutoUi(),
+      success: (m: string) => messages.push(m),
+      warn: (m: string) => messages.push(m),
+      error: (m: string) => errors.push(m),
+    }, state: { instanceId: 'this-install' } });
     ctx.prefs = { cockpit: { user: 'ops', password: 'password' } };
-    await expect(stepById('identity').run(ctx)).rejects.toBeInstanceOf(StepAborted);
-    expect(errors.join('\n')).toContain('serving another install, not this one');
+    return {
+      ctx,
+      messages,
+      errors,
+      cleanup: () => {
+        if (previousHome === undefined) delete process.env.CEZ_HOME;
+        else process.env.CEZ_HOME = previousHome;
+        rmSync(authHome, { recursive: true, force: true });
+      },
+    };
+  }
+
+  it('rejects a different cezar instance answering on the expected port', async () => {
+    const { ctx, errors, cleanup } = identityCtx('{"instanceId":"other-install"}\n200');
+    try {
+      await expect(stepById('identity').run(ctx)).rejects.toBeInstanceOf(StepAborted);
+      expect(errors.join('\n')).toContain('serving another install, not this one');
+    } finally {
+      cleanup();
+    }
   });
 
   it('accepts a matching identity', async () => {
-    const { ctx } = identityCtx('{"instanceId":"this-install"}\n200');
-    await expect(stepById('identity').run(ctx)).resolves.toBeTruthy();
+    const { ctx, cleanup } = identityCtx('{"instanceId":"this-install"}\n200');
+    try {
+      await expect(stepById('identity').run(ctx)).resolves.toBeTruthy();
+    } finally {
+      cleanup();
+    }
   });
 
   it.each([
@@ -566,9 +577,13 @@ describe('ubuntu-vps identity verification (#1008)', () => {
     ['a malformed health payload', 'not-json\n200'],
     ['a forbidden health response', '{"error":"forbidden"}\n403'],
   ])('reports %s as an inconclusive identity check', async (_label, healthOutput) => {
-    const { ctx, messages } = identityCtx(healthOutput);
-    await expect(stepById('identity').run(ctx)).resolves.toBeTruthy();
-    expect(messages.join('\n')).toContain('identity check could not run');
+    const { ctx, messages, cleanup } = identityCtx(healthOutput);
+    try {
+      await expect(stepById('identity').run(ctx)).resolves.toBeTruthy();
+      expect(messages.join('\n')).toContain('identity check could not run');
+    } finally {
+      cleanup();
+    }
   });
 });
 
