@@ -21,9 +21,10 @@ const MAX_OUTPUT_CHARS = 512 * 1_024;
  * One `provider/model` id per line — the shape `opencode models` prints (#794). Deliberately
  * strict: anything else (a banner, a prompt, a stack trace, a bare model name that OpenCode
  * could not route) is NOT a model id, and silently turning it into a picker entry would
- * recreate the very defect this replaces.
+ * recreate the very defect this replaces. The model segment may open with one `@`, because
+ * Cloudflare Workers AI ids do (`cloudflare-workers-ai/@cf/…`, spec 2026-10-04-cloudflare-workers-ai).
  */
-const MODEL_LINE_RE = /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._:/-]*$/i;
+const MODEL_LINE_RE = /^[a-z0-9][a-z0-9._-]*\/@?[a-z0-9][a-z0-9._:/-]*$/i;
 
 /** SGR/CSI sequences, in case a future CLI colorizes even a piped stdout. */
 const ANSI_RE = /\u001B\[[0-9;]*[A-Za-z]/g;

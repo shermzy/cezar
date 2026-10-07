@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildChildEnv, looksSecret } from './agent-env.ts';
+import { RUNNER_IDS, type AgentBackend } from './agent-runner.ts';
 
 /**
  * #427: the spawned backend must NOT inherit the full host environment. It
@@ -348,4 +349,59 @@ it.each(['claude', 'codex', 'opencode'] as const)('does not forward tracker cred
   } });
   expect(env.JIRA_API_TOKEN).toBeUndefined();
   expect(env.LINEAR_API_KEY).toBeUndefined();
+});
+
+/**
+ * Cloudflare Workers AI through OpenCode (spec 2026-10-04-cloudflare-workers-ai). The account id
+ * is an identifier OpenCode reads from the env before its own store; the key is never forwarded
+ * by default, because CLOUDFLARE_API_KEY is also the name of Cloudflare's Global API Key.
+ */
+describe('buildChildEnv — Cloudflare Workers AI account id', () => {
+  const CF: NodeJS.ProcessEnv = {
+    PATH: '/usr/bin',
+    CLOUDFLARE_ACCOUNT_ID: '0123456789abcdef0123456789abcdef',
+    CLOUDFLARE_API_KEY: 'cf-key-value',
+    CLOUDFLARE_API_TOKEN: 'cf-account-token-value',
+    CLOUDFLARE_EMAIL: 'owner@example.com',
+  };
+  const OTHER_BACKENDS: AgentBackend[] = [...RUNNER_IDS.filter((id) => id !== 'opencode'), 'claude-cli'];
+
+  // F1
+  it('forwards CLOUDFLARE_ACCOUNT_ID to opencode', () => {
+    const env = buildChildEnv({ backend: 'opencode', source: CF });
+    expect(env.CLOUDFLARE_ACCOUNT_ID).toBe('0123456789abcdef0123456789abcdef');
+  });
+
+  // F2
+  it.each(OTHER_BACKENDS)('never forwards it to %s', (backend) => {
+    const env = buildChildEnv({ backend, source: CF });
+    expect(env.CLOUDFLARE_ACCOUNT_ID).toBeUndefined();
+  });
+
+  // F3
+  it('forwards no Cloudflare secret to opencode by default', () => {
+    const env = buildChildEnv({ backend: 'opencode', source: CF });
+    expect(env.CLOUDFLARE_API_KEY).toBeUndefined();
+    expect(env.CLOUDFLARE_API_TOKEN).toBeUndefined();
+    expect(env.CLOUDFLARE_EMAIL).toBeUndefined();
+  });
+
+  // F4
+  it('still forwards the key when the user opts in with CEZ_ENV_PASSTHROUGH', () => {
+    const env = buildChildEnv({
+      backend: 'opencode',
+      source: { ...CF, CEZ_ENV_PASSTHROUGH: 'CLOUDFLARE_API_KEY' },
+    });
+    expect(env.CLOUDFLARE_API_KEY).toBe('cf-key-value');
+  });
+
+  // F5
+  it('matches a Windows spelling and keeps it verbatim', () => {
+    const env = buildChildEnv({
+      backend: 'opencode',
+      source: { Path: 'C:\\Windows\\system32', Cloudflare_Account_Id: 'abc123' },
+    });
+    expect(env.Cloudflare_Account_Id).toBe('abc123');
+    expect(env.CLOUDFLARE_ACCOUNT_ID).toBeUndefined();
+  });
 });
