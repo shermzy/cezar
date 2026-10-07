@@ -53,6 +53,7 @@ import {
 // A contract VALUE, like `workspaceUiStateSchema` in workspace/migrations.ts — the request
 // schema this route validates with is the same one the client compiles against.
 import {
+  agentAccountSelectionSchema,
   attachmentInputSchema,
   modelDiscoveryRunnerSchema,
   openProjectInSchema,
@@ -1800,12 +1801,12 @@ export function createApp(deps: ServerDeps) {
    * with several accounts would otherwise fan out a spawn storm at exactly the moment the browser is
    * fetching the bundle; nothing is waiting on this, so sequential costs nothing that matters.
    *
-   * Hosted mode warms only the defaults: the agent-profiles family is refused there, so there are
-   * no accounts to learn about.
+   * Hosted mode warms every account too (spec 2026-10-04-hosted-agent-accounts H1): its listing
+   * serves them, without their folders, and a row's cache-only `status` is only real once warmed —
+   * the read-only cockpit never calls the per-account probe route.
    */
   const warmAgentKnowledge = async (): Promise<void> => {
     await providerAuth.status().catch(() => {});
-    if (!capabilities().localHandoff) return;
     const store = await loadAgentAccounts().catch(() => defaultAgentAccountStore());
     for (const account of listAgentProfiles(store, PROVIDER_IDS)) {
       if (account.isDefault) continue; // covered by `status()` above
@@ -2058,14 +2059,27 @@ export function createApp(deps: ServerDeps) {
     );
   };
 
-  /** Build the wire row for one resolved profile: its dir state plus whatever auth is cached. */
+  /**
+   * Build the wire row for one resolved profile: its dir state plus whatever auth is cached.
+   *
+   * A cockpit that is not local gets the row WITHOUT its folder (spec
+   * 2026-10-04-hosted-agent-accounts): `configDir`, `path` and `files` are absolute paths carrying the
+   * username, and `exists`/`looksValid` would answer "does this folder exist" — an existence oracle.
+   * Redacted HERE, the one builder every caller uses (the listing, `POST` 201, `PATCH`), so no hosted
+   * answer can carry one, and the dir is not even stat'ed for it. Spread, not `key: maybe`, for the
+   * reason the `status` spread below gives.
+   */
   const agentProfileBody = async (profile: ResolvedAgentProfile) => ({
     id: profile.id,
     provider: profile.provider,
     label: profile.label,
-    configDir: profile.configDir,
-    path: profile.path,
-    ...(await profileDirState(profile.provider, profile.path)),
+    ...(capabilities().localHandoff
+      ? {
+          configDir: profile.configDir,
+          path: profile.path,
+          ...(await profileDirState(profile.provider, profile.path)),
+        }
+      : {}),
     isDefault: profile.isDefault,
     // CACHED auth only — this listing must never pay a CLI spawn.
     //
@@ -2085,7 +2099,7 @@ export function createApp(deps: ServerDeps) {
         : providerAuth.peekProfileStatus(profile.provider, profile.id);
       return cached ? { status: cached } : {};
     })(),
-    files: await accountFiles(profile),
+    ...(capabilities().localHandoff ? { files: await accountFiles(profile) } : {}),
   });
 
   /**
@@ -2140,37 +2154,74 @@ export function createApp(deps: ServerDeps) {
     return null;
   };
 
+  /**
+   * The per-project and machine-wide account choices a cockpit that is not local may read (spec
+   * 2026-10-04-hosted-agent-accounts). A selection is served only for a root a hosted client
+   * already holds:
+   * - the roots of registered projects, as hosted `GET /api/v1/projects` serves them (just the
+   *   boot project's under `CEZ_SINGLE_PROJECT`). Nothing removes a selection when its project is
+   *   unregistered, and a stale root would disclose something that route does not;
+   * - the boot folder, realpath'd the way that route spells an unregistered one. `GET …/repo` serves
+   *   it, and the composer reads the folder's selection from there, so dropping it would show
+   *   Default while the run uses the stored account.
+   *
+   * Every value then goes through the contract's selection schema, which drops what it does not
+   * name: the store keeps unknown keys on disk (`.passthrough()`, so an older cezar never loses a
+   * newer one's), and a hand edit or a future key must not reach a hosted client. Read-time only —
+   * the file is never rewritten. Fails closed: an unreadable registry names no project.
+   */
+  const hostedAccountChoices = async (
+    store: AgentAccountStore,
+  ): Promise<Pick<AgentAccountStore, 'selections' | 'defaults'>> => {
+    const roots = new Set<string>([await realpath(bootRoot).catch(() => bootRoot)]);
+    try {
+      const { projects } = await loadWorkspaceConfig();
+      const only = capabilities().singleProject ? await resolveBootProject(projects) : undefined;
+      for (const project of projects) {
+        if (only === undefined || project.id === only) roots.add(project.root);
+      }
+    } catch {
+      // unreadable workspace: no project is known to be registered
+    }
+    const selections: AgentAccountStore['selections'] = {};
+    for (const [root, selection] of Object.entries(store.selections)) {
+      if (roots.has(root)) selections[root] = agentAccountSelectionSchema.parse(selection);
+    }
+    return { selections, defaults: agentAccountSelectionSchema.parse(store.defaults) };
+  };
+
   const agentProfilesRoutes = new Hono<ProjectApiEnv>()
     .get('/workspace/agent-profiles', async (c) => {
-      const editable = capabilities().localHandoff;
-      // Hosted mode withholds the listing entirely rather than serving it read-only: the paths
-      // are the host disclosure, so an empty list is the only honest hosted answer.
+      // `editable`: folders are shown and editable here (local only). `manageable`: this cockpit may
+      // change accounts at all. A cockpit that is not local lists every account READ-ONLY and
+      // without its folder (spec 2026-10-04-hosted-agent-accounts H1; `agentProfileBody` redacts).
       //
       // ONE body object, never a hosted `return` and a local `return`: two returns let hono
       // narrow `editable` to the literal `false`/`true` of each branch, and the contract's
       // honest `z.boolean()` then reads as wider than the route. Same shape as
       // `listAgentConfig`, which carries the same flag for the same reason.
+      const editable = capabilities().localHandoff;
+      const manageable = editable;
       let store = defaultAgentAccountStore();
-      if (editable) {
-        try {
-          store = await loadAgentAccounts();
-        } catch {
-          // an unreadable home degrades to "no extra accounts", never a failed request
-        }
+      try {
+        store = await loadAgentAccounts();
+      } catch {
+        // an unreadable home degrades to "no extra accounts", never a failed request
       }
-      const profiles = editable
-        ? await Promise.all(listAgentProfiles(store, PROVIDER_IDS).map(agentProfileBody))
-        : [];
+      const profiles = await Promise.all(listAgentProfiles(store, PROVIDER_IDS).map(agentProfileBody));
+      // Local serves the store as it is. A cockpit that is not local serves the filtered view: see
+      // `hostedAccountChoices`.
+      const { selections, defaults } = editable ? store : await hostedAccountChoices(store);
       return c.json({
         editable,
+        manageable,
         profiles,
         profileCapableProviders: [...PROFILE_CAPABLE_PROVIDERS],
         // Which account each project uses, keyed by repo root. Served here rather than on the
         // project registry because it lives in the same file as the accounts it names.
-        selections: editable ? store.selections : {},
-        /** The machine-wide fallback, for repos that have chosen nothing. Withheld in hosted mode
-         *  on the same terms as the rest of this family. */
-        defaults: editable ? store.defaults : {},
+        selections,
+        /** The machine-wide fallback, for repos that have chosen nothing. */
+        defaults,
       });
     })
 

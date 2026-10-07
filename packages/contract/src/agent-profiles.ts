@@ -55,16 +55,21 @@ export const agentProfileSchema = z.object({
   id: z.string(),
   provider: providerIdSchema,
   label: z.string(),
-  /** As the user wrote it — a literal `~` is preserved, matching `browseRoot`/`projectsDir`. */
-  configDir: z.string(),
+  /** As the user wrote it — a literal `~` is preserved, matching `browseRoot`/`projectsDir`.
+   *
+   *  **This and the next three fields are ABSENT on a cockpit that is not local** (spec
+   *  2026-10-04-hosted-agent-accounts): they are absolute paths, or say which folders exist.
+   *  Absent means "not disclosed" — never "missing" — so a consumer tests `exists === false`,
+   *  never `!exists`. */
+  configDir: z.string().optional(),
   /** Expanded absolute path. Same-origin route, like `ProjectListEntry.root`. */
-  path: z.string(),
+  path: z.string().optional(),
   /** False for a dir the CLI has not created yet — legitimate, and NOT a reason to fall back
    *  to another account at run time (that would silently bill the wrong subscription). */
-  exists: z.boolean(),
+  exists: z.boolean().optional(),
   /** Whether the dir carries this agent's own marker files. ADVISORY: an unrecognised dir is
    *  still accepted, because "add profile → Connect → the CLI creates it" is the real flow. */
-  looksValid: z.boolean(),
+  looksValid: z.boolean().optional(),
   /** True for the profile cezar discovers from the environment. Never stored, never deletable. */
   isDefault: z.boolean(),
   /** This account's own authentication state — two Claude logins answer independently.
@@ -76,8 +81,9 @@ export const agentProfileSchema = z.object({
    *  real probe result — and the cockpit fills it in from `…/:id/status`. */
   status: providerStatusSchema.optional(),
   /** This agent's own user-scope config files, resolved inside THIS account's folder — so a
-   *  second login's `settings.json` is the one you open, not the default account's. */
-  files: z.array(agentAccountFileSchema),
+   *  second login's `settings.json` is the one you open, not the default account's. Absent where
+   *  `configDir` is (each one carries an absolute path). */
+  files: z.array(agentAccountFileSchema).optional(),
 });
 export type AgentProfile = z.infer<typeof agentProfileSchema>;
 
@@ -109,12 +115,17 @@ export type AgentAccountSelection = z.infer<typeof agentAccountSelectionSchema>;
 /**
  * `GET /api/v1/workspace/agent-profiles` — every account, discovered defaults first.
  *
- * `editable` is false in hosted mode (`CEZ_REMOTE`), where the whole family is refused: defining
- * a profile points an agent at a local directory, and the listing echoes absolute paths carrying
- * the username. Same posture as `PUT /api/v1/agent-config/:id`.
+ * `editable` is false on a cockpit that is not local (`CEZ_REMOTE`, or a non-loopback bind) and
+ * still means "folder paths are shown and editable here". Such a cockpit lists every account
+ * WITHOUT its folder (spec 2026-10-04-hosted-agent-accounts): `configDir`, `path`, `files`, `exists`
+ * and `looksValid` are absent from each row.
+ *
+ * `manageable` says whether this cockpit may change accounts at all — add, rename, remove, assign,
+ * and probe one account's status. Always true locally.
  */
 export const agentProfilesResponseSchema = z.object({
   editable: z.boolean(),
+  manageable: z.boolean(),
   profiles: z.array(agentProfileSchema),
   /** Providers that can carry more than one account at all — what "Add account" is offered for.
    *  OpenCode is absent: its credentials live in its data dir (`auth.json`), which no config-dir
@@ -126,7 +137,9 @@ export const agentProfilesResponseSchema = z.object({
    *  Served here rather than on `GET /api/v1/projects` because it is stored beside the accounts it
    *  names (`~/.cezar/agent-accounts.json`) — one file, so deleting an account and scrubbing every
    *  reference to it is one atomic write, and neither can be dropped by a cezar version that never
-   *  heard of accounts. Empty in hosted mode, where the whole family is withheld. */
+   *  heard of accounts. Served on a hosted cockpit too, but only for REGISTERED projects — the roots
+   *  hosted `GET /api/v1/projects` already serves — and with each value cut to the keys
+   *  `agentAccountSelectionSchema` names; `defaults` is cut the same way. */
   selections: z.record(z.string(), agentAccountSelectionSchema),
   /** The machine-wide fallback account per provider, used by any repo that has chosen none. */
   defaults: agentAccountSelectionSchema,

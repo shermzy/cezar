@@ -27,7 +27,7 @@ import { AppRoutes } from '@/routes'
 let requests: Array<{ method: string; url: string; body?: unknown }> = []
 
 const ACCOUNTS: AgentProfilesResponse = {
-  editable: true,
+  editable: true, manageable: true,
   profileCapableProviders: ['claude', 'codex'],
   selections: {},
   defaults: {},
@@ -288,6 +288,19 @@ describe('Agent accounts → Defaults for new projects', () => {
     await waitFor(() => expect(rowFor('claude', 'klaudiusz')?.getAttribute('aria-checked')).toBe('true'))
   })
 
+  it.each([
+    ['an account that no longer exists', 'gone'],
+    ['the reserved spelling, which the store never holds', 'default'],
+  ])('shows the discovered account as the one in force when the machine default is %s', async (_, stored) => {
+    serve({ accounts: { ...ACCOUNTS, defaults: { claude: stored } } })
+    renderAccounts()
+
+    await waitFor(() => expect(rows()).toHaveLength(8))
+    // No row carries that id, and a run on it uses the discovered account — so that row is checked.
+    expect(rowFor('claude', '')?.getAttribute('aria-checked')).toBe('true')
+    expect(rowFor('claude', 'klaudiusz')?.getAttribute('aria-checked')).toBe('false')
+  })
+
   it('clears an account back to the discovered one with null, never the reserved id', async () => {
     serve({ accounts: { ...ACCOUNTS, defaults: { claude: 'klaudiusz' } } })
     renderAccounts()
@@ -328,5 +341,63 @@ describe('Agent accounts → Defaults for new projects', () => {
     const pane = defaults()
     expect(pane?.textContent).toContain('has not chosen for itself')
     expect(pane?.textContent).toContain('keeps its own')
+  })
+})
+
+/**
+ * A cockpit that does not manage accounts (spec 2026-10-04-hosted-agent-accounts): the rows carry no
+ * folder, and the selection route would answer 409. The runner half is the workspace config, which a
+ * hosted cockpit has always been allowed to write — so only the account half is locked, and the
+ * account already in force stays pickable.
+ */
+describe('Agent accounts → Defaults for new projects, where accounts are not managed', () => {
+  const hosted = (defaults: AgentProfilesResponse['defaults']): AgentProfilesResponse => ({
+    ...ACCOUNTS,
+    editable: false,
+    manageable: false,
+    defaults,
+    profiles: ACCOUNTS.profiles.map(({ id, provider, label, isDefault }) => ({ id, provider, label, isDefault })),
+  })
+  const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
+
+  it('keeps the account in force pickable and locks the other logins, with the reason attached', async () => {
+    serve({ accounts: hosted({ claude: 'klaudiusz' }) })
+    renderAccounts()
+
+    await waitFor(() => expect(rows()).toHaveLength(8))
+    expect(rowFor('claude', 'klaudiusz')?.disabled).toBe(false)
+    expect(rowFor('claude', '')?.disabled).toBe(true)
+    // A single-login agent is not an account choice at all.
+    expect(rowFor('codex')?.disabled).toBe(false)
+    // The reason reaches a screen reader, not only the tooltip, and only where there is a lock.
+    const reason = document.getElementById(rowFor('claude', '')?.getAttribute('aria-describedby') ?? '')
+    expect(reason?.textContent).toContain('can’t be changed from this cockpit')
+    expect(rowFor('claude', 'klaudiusz')?.hasAttribute('aria-describedby')).toBe(false)
+    expect(rowFor('codex')?.hasAttribute('aria-describedby')).toBe(false)
+  })
+
+  it('writes the runner alone when the account in force is picked — never a selection', async () => {
+    serve({ accounts: hosted({ claude: 'klaudiusz' }), agentDefaults: { runner: 'codex' } })
+    renderAccounts()
+
+    await waitFor(() => expect(rows()).toHaveLength(8))
+    fireEvent.click(rowFor('claude', 'klaudiusz')!)
+
+    await waitFor(() => expect(configPuts()).toHaveLength(1))
+    expect(configPuts()[0]?.body).toEqual({ agentDefaults: { runner: 'claude' } })
+    await settle()
+    expect(selections()).toHaveLength(0)
+  })
+
+  it('does not lock Claude out when the stored account matches no row', async () => {
+    // Deleted, hand-edited, or a spelling no row carries: a run on it uses the discovered account,
+    // so that is the row in force — otherwise every Claude row would be locked.
+    serve({ accounts: hosted({ claude: 'gone' }) })
+    renderAccounts()
+
+    await waitFor(() => expect(rows()).toHaveLength(8))
+    expect(rowFor('claude', '')?.disabled).toBe(false)
+    expect(rowFor('claude', '')?.getAttribute('aria-checked')).toBe('true')
+    expect(rowFor('claude', 'klaudiusz')?.disabled).toBe(true)
   })
 })
