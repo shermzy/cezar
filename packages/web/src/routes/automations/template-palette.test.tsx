@@ -55,7 +55,7 @@ describe('TemplatePalette', () => {
     expect(onPick).toHaveBeenLastCalledWith(expect.objectContaining({
       kind: 'github',
       events: ['pull_request.opened'],
-      workflow: 'pr-review',
+      workflow: 'builtin:pr-review',
       prompt: expect.stringContaining('{{github.url}}'),
     }))
     // The other-projects list is not fetched until its tab opens.

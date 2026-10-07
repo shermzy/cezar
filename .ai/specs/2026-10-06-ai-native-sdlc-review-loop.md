@@ -43,7 +43,7 @@ One agent step with:
 
 ## Automation template
 
-`BUILTIN_AUTOMATION_TEMPLATES` gains **Review new pull requests**: GitHub trigger `pull_request.opened`, 5-minute interval, `workflow: 'pr-review'`, prompt `Review pull request {{github.url}}.` The file's header comment ("none names a workflow") is corrected: a built-in workflow exists in every repo, so naming one is safe.
+`BUILTIN_AUTOMATION_TEMPLATES` gains **Review new pull requests**: GitHub trigger `pull_request.opened`, 5-minute interval, the trusted built-in reference `workflow: 'builtin:pr-review'`, prompt `Review pull request {{github.url}}.` This reference bypasses a same-named repository workflow so the template keeps its restricted review steps.
 
 ## Baseline v2 (`packages/cezar/baseline/`, version 1 → 2)
 
@@ -54,7 +54,7 @@ One agent step with:
 
 ## Audit changes (`src/sdlc/scan.ts`)
 
-- `agent-review`: Present when `REVIEW.md` **and** (a `claude-code-action` workflow **or** an enabled automation with `task.workflow === 'pr-review'` in `.ai/cezar/automations.json`); Partial for either half alone, with a note naming what is missing.
+- `agent-review`: Present when `REVIEW.md` **and** (a `claude-code-action` workflow **or** an enabled automation with `task.workflow === 'builtin:pr-review'` in `.ai/cezar/automations.json`); Partial for either half alone, with a note naming what is missing.
 - `approval-gates`: the gate pattern now also matches `merge` and `approve`, so the v2 guard counts.
 
 ## Failure modes (tests written first)
@@ -66,7 +66,7 @@ One agent step with:
 | `gh api -X PUT .../pulls/N/merge`, `.../reviews -f event=APPROVE`, GraphQL merge/approve | Blocked |
 | Non-Bash tool event, unreadable stdin | Allowed (exit 0) |
 | `automations.json` missing, corrupt or huge | `agent-review` falls back to the workflow-file check; never throws |
-| Repo shadows `pr-review` with its own file | Its file wins, like any built-in |
+| Repo shadows `pr-review` with its own file | Ordinary `pr-review` workflow references use the file; the PR-review template's `builtin:pr-review` keeps the trusted built-in |
 | `pr-review` step definition | One step; no `Write`/`Edit`; allowlist excludes `gh pr review`, `gh pr merge`, `git push` |
 
 ## Not done (deliberately)

@@ -247,7 +247,7 @@ async function detectConfigEvals(ctx: Context): Promise<SdlcPlayResult> {
 /** The automations store cezar writes under a project; read defensively, it is plain editable JSON. */
 const AUTOMATIONS_PATH = '.ai/cezar/automations.json';
 
-/** `[enabledReviewer, anyReviewer]`: automations running the built-in `pr-review` workflow. */
+/** `[enabledReviewer, anyReviewer]`: automations running the trusted built-in PR review workflow. */
 async function cezarReviewAutomations(root: string): Promise<{ enabled: boolean; any: boolean }> {
   const raw = await readCapped(root, AUTOMATIONS_PATH);
   const doc = parseJson(raw);
@@ -258,7 +258,7 @@ async function cezarReviewAutomations(root: string): Promise<{ enabled: boolean;
     if (!item || typeof item !== 'object') continue;
     const def = item as { enabled?: unknown; task?: unknown };
     const task = def.task && typeof def.task === 'object' ? (def.task as { workflow?: unknown }) : null;
-    if (task?.workflow !== 'pr-review') continue;
+    if (task?.workflow !== 'builtin:pr-review') continue;
     any = true;
     if (def.enabled === true) enabled = true;
   }

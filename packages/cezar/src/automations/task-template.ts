@@ -1,7 +1,7 @@
 import type { DispatchIntent } from '@open-mercato/cezar-contract';
 import { zonedParts } from '@open-mercato/cezar-contract';
 import { loadWorkflows } from '../workflows/load.ts';
-import { stepsIssue, type WorkflowDef } from '../workflows/types.ts';
+import { PR_REVIEW_WORKFLOW, stepsIssue, type WorkflowDef } from '../workflows/types.ts';
 import type { RunStore } from '../runs/store.ts';
 import type { RunManager, StartRunInput } from '../workflows/run.ts';
 import type { GithubCandidate } from './github-poller.ts';
@@ -131,6 +131,7 @@ async function resolveWorkflow(root: string, definition: AutomationDefinition): 
     if (issue) throw new Error(issue);
     return { name: '(planned)', source: 'built-in', steps: definition.task.steps };
   }
+  if (definition.task.workflow === 'builtin:pr-review') return PR_REVIEW_WORKFLOW;
   const loaded = await loadWorkflows(root);
   const workflow = loaded.workflows.find((item) => item.name === (definition.task.workflow ?? 'quick-task'));
   if (!workflow) throw new Error(`unknown workflow: ${definition.task.workflow ?? 'quick-task'}`);

@@ -160,10 +160,10 @@ describe('scanProject: plays', () => {
     const auto = (enabled: boolean, workflow: string) =>
       JSON.stringify({ version: 1, automations: [{ id: 'a', name: 'Review', enabled, kind: 'github', task: { prompt: 'x', workflow } }] });
     const withAuto = (body: string) => ({ 'REVIEW.md': '# r', '.ai/cezar/automations.json': body });
-    const on = await scanProject(repo(withAuto(auto(true, 'pr-review'))));
+    const on = await scanProject(repo(withAuto(auto(true, 'builtin:pr-review'))));
     expect(on.results.find((r) => r.play === 'agent-review')).toMatchObject({ score: 'present' });
     expect(on.results.find((r) => r.play === 'agent-review')?.evidence).toContain('.ai/cezar/automations.json');
-    const paused = await scanProject(repo(withAuto(auto(false, 'pr-review'))));
+    const paused = await scanProject(repo(withAuto(auto(false, 'builtin:pr-review'))));
     expect(paused.results.find((r) => r.play === 'agent-review')).toMatchObject({ score: 'partial' });
     expect(paused.results.find((r) => r.play === 'agent-review')?.note).toMatch(/enable|paused/i);
     expect((await scores(repo(withAuto(auto(true, 'quick-task')))))['agent-review']).toBe('partial');

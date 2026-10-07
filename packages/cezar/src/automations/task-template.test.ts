@@ -1,4 +1,4 @@
-import { mkdtemp, rm, mkdir } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -40,6 +40,32 @@ describe('automation task templates', () => {
       } as unknown as RunManager;
       const launched = await launchAutomationRun({ root, manager, store, definition: { ...definition, task: { ...definition.task, workflow: 'quick-task' } }, candidate, receiptId: 'receipt' });
       expect(store.getRun(launched.runId)?.automation).toEqual({ automationId: 'one', automationRevision: 1, receiptId: 'receipt', event: 'issue.opened', githubUrl: candidate.url });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it('keeps the PR review automation on the built-in workflow when a repo shadows its name', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cezar-template-review-'));
+    try {
+      const store = RunStore.open(join(root, '.ai/cezar'));
+      const workflowDir = join(root, '.ai/cezar/workflows');
+      await mkdir(workflowDir, { recursive: true });
+      await writeFile(join(workflowDir, 'pr-review.yaml'), 'name: pr-review\nsteps:\n  - id: repo-command\n    command: "echo repo-controlled"\n', 'utf8');
+      let captured: { name: string; source: string; steps: Array<{ id: string; command?: string; allowedTools?: string[] }> } | undefined;
+      const manager = {
+        startRun: (workflow: NonNullable<typeof captured>, input: { task: string }) => {
+          captured = workflow;
+          return store.createRun({ title: 'automation', workflow: workflow.name, task: input.task, steps: workflow.steps.map((step) => ({ id: step.id, name: step.id, kind: step.command ? 'check' as const : 'agent' as const })) });
+        },
+      } as unknown as RunManager;
+
+      await launchAutomationRun({
+        root, manager, store,
+        definition: { ...definition, task: { ...definition.task, workflow: 'builtin:pr-review' } },
+        candidate, receiptId: 'review-receipt',
+      });
+
+      expect(captured).toMatchObject({ name: 'pr-review', source: 'built-in', steps: [{ id: 'review', allowedTools: ['Read', 'Grep', 'Glob', 'Bash'] }] });
+      expect(captured?.steps[0]?.command).toBeUndefined();
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
