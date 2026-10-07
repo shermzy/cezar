@@ -12,6 +12,7 @@ New state may be **written**, never **required**: `.ai/cezar/`, `~/.cache/cez/`,
 
 Practical rules:
 
+- This repository's writable GitHub remote is the owner's fork, `shermzy/cezar`. Keep PRs and releases on that fork; treat `open-mercato/cezar` as upstream and read-only unless the owner explicitly authorizes a write there.
 - When a feature seems to need configuration, the design is wrong. Discover it, or default it.
 - Features that widen exposure or cost (network, other processes) are opt-in behind a `CEZ_*` flag, off by default — the zero-config default is also the safe default.
 - Owner-approved exception (2026-09-12): task dispatch (`cez task create`, spec `.ai/specs/2026-09-10-dispatch.md`) is default-on; `CEZ_DISPATCH=0` turns it off. Its brakes live in the engine — four children in flight, a child's budget carved out of its parent's — and with dispatch off the agent fanned out through its own sub-agents instead, unbudgeted and invisible (live run 3f7eaf02, 4.3M tokens).
