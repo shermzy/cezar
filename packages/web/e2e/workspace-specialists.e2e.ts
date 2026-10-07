@@ -142,7 +142,7 @@ beforeAll(async () => {
     processRecordPath,
     JSON.stringify({
       owner: 'workspace-specialists.e2e.ts',
-      purpose: 'isolated CEZ_DRY_RUN server for two-project specialist verification',
+      purpose: 'isolated server for two-project specialist verification',
       pid: server.pid,
       parentPid: process.pid,
       createdAt: serverStartedAt,

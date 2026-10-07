@@ -131,6 +131,7 @@ describe('AppShell', () => {
     const links = within(nav()).getAllByRole('link')
     expect(links.map((a) => a.textContent)).toEqual([
       'Tasks',
+      'Agents',
       'Inbox',
       'Git',
       'GitHub',
@@ -142,6 +143,7 @@ describe('AppShell', () => {
     // Deep-linkable per Step 2.1: every nav row is an <a href>, not a button with an onClick.
     expect(links.map((a) => a.getAttribute('href'))).toEqual([
       '/',
+      '/agents',
       '/inbox',
       '/git',
       '/github',
