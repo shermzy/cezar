@@ -83,7 +83,7 @@ One browser window, with live task updates over Server-Sent Events:
 
 | View | What's in it |
 |---|---|
-| **Dashboard** | **Overview** shows attention, completed/failed outcomes, median cycle time, project comparisons, live work, enabled automations with next run/check times, and recent results; **Usage & cost** shows reported usage and trends. Counters open matching tasks. Drag widgets to reorder them, customize optional tiles and export the current view to PDF/CSV; saved layout is shared by browsers using this workspace. |
+| **Dashboard** | **Overview** shows attention, completed/failed outcomes, median cycle time, project comparisons, live work, enabled automations with next run/check times, and recent results; **Usage & cost** shows reported usage and trends; **SDLC** scores every project against the AI-native SDLC playbook (see below). Counters open matching tasks. Drag widgets to reorder them, customize optional tiles and export the current view to PDF/CSV; saved layout is shared by browsers using this workspace. |
 | **Tasks** | Every task with its status, live event stream (agent text · tool calls · tool results · pasted/generated screenshots and file attachments), tokens and cost. Continue, cancel, open in terminal (`claude --resume`), review the diff, or push a draft PR. |
 | **All tasks** | Every *registered project's* tasks in one table, filtered and grouped by tag, project, status or workflow — see [Grouping connected repositories](#grouping-connected-repositories-tags-and-the-all-tasks-page). Appears once a second project is registered. |
 | **Inbox** | **Opt-in** (`CEZ_FOLLOWUPS=1`; hidden by default). Follow-ups an agent left behind (`todos.json`) — one click turns a suggestion into the next task, pre-wired to its suggested skill. Off, agents are never asked to leave follow-ups; each task's own **Notes** handoff journal is unaffected. |
@@ -234,6 +234,23 @@ segment.
 > whole home. Clones continue to use the separate checkout root.
 
 ---
+
+### The AI-native SDLC across your projects
+
+The Dashboard's **SDLC** tab audits every registered project against the plays of Anthropic's AI-native SDLC playbook: `intent.md`, a spec, a plan, a short `CLAUDE.md`, skills, build-time hooks, subagents, a self-verifying feedback loop, config evals, agent PR review, approval-gate hooks, CI agent jobs, a monitoring loop and scheduled scans. Each cell is **Present**, **Partial** or **Absent** with the files that justify it; click a cell to see them. The scan is deterministic: it reads a fixed set of files (64 KB each; symlinks that leave the repo are not followed), uses no agent, no network and no tokens, and writes nothing. A project whose folder is gone shows as unavailable instead of failing the audit.
+
+**Adopt baseline** starts one ordinary task per selected project that writes a small, versioned baseline into the task's own worktree (`CLAUDE.md`, `.claude/settings.json` with a secret/lockfile guard and a format-on-edit hook, `REVIEW.md`, and an `intent/` template) and then stops at the usual review gate. You read the diff and push a draft PR yourself; nothing is merged for you. A file that already exists is never edited, and `.claude/cezar-baseline.json` records what cezar wrote so a later baseline version updates only files nobody touched. The repository owns its copy afterwards.
+
+```bash
+cezar sdlc baseline plan  --into ~/code/api   # what it would do, writes nothing
+cezar sdlc baseline apply --into ~/code/api   # create the missing files
+```
+
+**Agent PR review runs in cezar, not in your repos.** The built-in `pr-review` workflow reviews a pull request it did not write: it reads the PR with `gh pr view`/`diff`/`checks`, follows the repo's `REVIEW.md` when there is one, sorts findings into Important and Nit (at most five), and posts **one** `gh pr comment`. It has no file-writing tool and no `gh pr review`, so it cannot approve, request changes, merge or edit; on the Claude backend that is enforced by its tool allowlist, on other backends it is an instruction. To turn it on, open Automations, choose the **Review new pull requests** template, and enable it; each PR it picks up becomes an ordinary task in its own worktree. Reviewing with a different backend or model than the author is recommended.
+
+Baseline v2 adds a `PreToolUse` hook, `.claude/hooks/guard-merge.mjs`, that blocks an agent's Bash from `gh pr merge`, `gh pr review --approve` and the equivalent `gh api` calls: an agent does not merge or approve a pull request, a human does. It tells a call from a mention, so a commit message or comment that quotes the command is not blocked. This binds Claude Code sessions in repos that adopted the baseline; it does not stop an agent on another backend, and GitHub branch protection (required reviews, no self-approval) remains the backstop. A repo on baseline v1 shows **Baseline outdated**; adopting again adds the guard and updates only files you have not edited.
+
+Put your own baseline in `~/.cezar/sdlc-baseline/` (a `manifest.json` plus the files it lists) to replace the built-in one; an invalid directory is ignored with one warning. Adoption is a local-checkout action and is unavailable on a hosted cockpit. Spec: `.ai/specs/2026-10-06-ai-native-sdlc-fleet.md`.
 
 ## Workflow format
 

@@ -2,11 +2,10 @@ import type { AutomationDispatch, AutomationEvent, AutomationSchedule } from '@o
 
 /**
  * The editor's built-in automation templates (spec 2026-09-14-automations-redesign § UI/UX 4,
- * from the design's `data.js`): six starting points that fill the whole form. They ship in code
+ * from the design's `data.js`): seven starting points that fill the whole form. They ship in code
  * — nothing to configure, nothing persisted — and cost nothing on a cockpit that never opens
- * the palette. None names a workflow: the cockpit's default (`quick-task`) is the one workflow
- * every repo has, and a template that named another would launch into "unknown workflow" on a
- * repo without it.
+ * the palette. A template names a workflow only if it is built in. `builtin:pr-review` is an
+ * explicit trusted reference so a repo workflow with the same display name cannot replace it.
  */
 export interface AutomationTemplateDraft {
   name: string
@@ -58,6 +57,15 @@ export const BUILTIN_AUTOMATION_TEMPLATES: readonly AutomationTemplateDraft[] = 
     schedule: { type: 'weekly', day: 2, hour: 2, minute: 0 },
     prompt: 'Run the suite 5×, quarantine intermittent tests, open an issue per test.',
     dispatch: { maxSubtasks: 8, reviewChild: true },
+  },
+  {
+    name: 'Review new pull requests',
+    when: 'On pull_request.opened · every 5 min',
+    kind: 'github',
+    events: ['pull_request.opened'],
+    intervalSeconds: 300,
+    workflow: 'builtin:pr-review',
+    prompt: 'Review pull request {{github.url}}.',
   },
   {
     name: 'Security advisories',

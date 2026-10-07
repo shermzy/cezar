@@ -248,6 +248,18 @@ describe('AutomationEditor — new', () => {
     expect((saveButton() as HTMLButtonElement).disabled).toBe(false)
   })
 
+  it('preserves the trusted built-in PR review workflow when saving its template', async () => {
+    const sent = stubFetch()
+    const { onSaved } = renderEditor()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Use this: Review new pull requests' })).not.toBeNull())
+    fireEvent.click(screen.getByRole('button', { name: 'Use this: Review new pull requests' }))
+    fireEvent.click(saveButton())
+    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1))
+
+    const post = sent.find((request) => request.method === 'POST' && request.path === '/api/v1/automations')
+    expect(post?.body).toMatchObject({ task: { workflow: 'builtin:pr-review' } })
+  })
+
   it('inserts a prompt template at the caret and offers Manage… into Settings', async () => {
     stubFetch()
     renderEditor()
