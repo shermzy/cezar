@@ -8,6 +8,16 @@ import {
   updateWorkspaceSpecialist,
 } from '@/api/client'
 import { useProjects, useRunsIndex, useWorkspaceSpecialists, workspaceQueryKeys } from '@/api/queries'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toaster'
@@ -38,6 +48,7 @@ export function AgentsRoute() {
   const rolesQuery = useWorkspaceSpecialists()
   const indexQuery = useRunsIndex()
   const [editor, setEditor] = useState<RoleDraft | null>(null)
+  const [deletingRole, setDeletingRole] = useState<SpecialistDefinition | null>(null)
   const [handoff, setHandoff] = useState<HandoffDraft | null>(null)
   const [handoffTarget, setHandoffTarget] = useState('')
   const [handoffNote, setHandoffNote] = useState('')
@@ -202,9 +213,7 @@ export function AgentsRoute() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={() => {
-                          if (window.confirm(`Delete ${role.name}? Existing runs keep their role snapshot.`)) removeRole.mutate(role.id)
-                        }}
+                        onClick={() => setDeletingRole(role)}
                         disabled={removeRole.isPending}
                       >
                         Delete
@@ -261,7 +270,7 @@ export function AgentsRoute() {
                                     required
                                     value={handoffTarget}
                                     onChange={(event) => setHandoffTarget(event.target.value)}
-                                    className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+                                    className="h-9 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
                                   >
                                     {projects.filter((entry) => entry.id !== run.projectId).map((target) => (
                                       <option key={target.id} value={target.id}>{target.name}</option>
@@ -299,6 +308,33 @@ export function AgentsRoute() {
           })}
         </section>
       )}
+      <AlertDialog
+        open={deletingRole !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeletingRole(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete “{deletingRole?.name}”?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This removes the specialist from the workspace. Existing runs keep their saved role instructions.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-danger text-danger-foreground hover:brightness-[0.96]"
+              onClick={() => {
+                if (deletingRole) removeRole.mutate(deletingRole.id)
+                setDeletingRole(null)
+              }}
+            >
+              Delete specialist
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
