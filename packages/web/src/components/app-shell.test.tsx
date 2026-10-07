@@ -132,6 +132,7 @@ describe('AppShell', () => {
     expect(links.map((a) => a.textContent)).toEqual([
       'Tasks',
       'Board',
+      'Agents',
       'Inbox',
       'Git',
       'GitHub',
@@ -144,6 +145,7 @@ describe('AppShell', () => {
     expect(links.map((a) => a.getAttribute('href'))).toEqual([
       '/',
       '/board',
+      '/agents',
       '/inbox',
       '/git',
       '/github',

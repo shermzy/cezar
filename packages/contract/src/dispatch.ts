@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { runnerSchema } from './health.ts';
+import { specialistIdSchema } from './specialists.ts';
 
 /**
  * The DISPATCH family of `/api/v1`: a task may dispatch other tasks (spec
@@ -128,6 +129,8 @@ export const dispatchInputSchema = z
     /** The child's backend and model. Absent = the parent's. */
     runner: runnerSchema.optional(),
     model: z.string().max(200).optional(),
+    /** Optional workspace role for the child. The server resolves and snapshots it before queueing. */
+    specialistId: specialistIdSchema.optional(),
   })
   .strict();
 export type DispatchInput = z.infer<typeof dispatchInputSchema>;

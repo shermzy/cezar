@@ -8,6 +8,8 @@ import { workflowDefSchema, workflowStepDefSchema } from './workflows.ts';
 // one. `src/runs/store.ts` imports the SAME value for its persistence twin, so the two halves of
 // `contract-parity.runs.test.ts` cannot drift apart by construction.
 import { dispatchIntentSchema, dispatchSchema } from './dispatch.ts';
+import { specialistRunIdentitySchema, specialistSnapshotSchema } from './specialists.ts';
+import { deliveryRecordSchema } from './delivery.ts';
 
 /**
  * The RUNS family of `/api/v1` — a task's record, its lifecycle mutations, and the artifacts
@@ -168,6 +170,8 @@ export const runRecordSchema = z.object({
   /** The composer's per-task agent account (spec 2026-07-29-agent-profiles), applying to steps
    *  on `runner`. Absent = the run follows the project's own selection. */
   agentProfile: z.string().optional(),
+  /** Immutable workspace specialist prompt used by this run, independent of provider account. */
+  specialistSnapshot: specialistSnapshotSchema.optional(),
   /** Echo of the extra system prompt the run used (POST override or config default). */
   systemPrompt: z.string().optional(),
   /** false when the run deliberately disabled follow-up todo generation. Absent means enabled. */
@@ -215,6 +219,8 @@ export const runRecordSchema = z.object({
    * always has.
    */
   dispatch: dispatchSchema.optional(),
+  /** User-started read-only delivery tracking; independent from `status`. */
+  delivery: deliveryRecordSchema.optional(),
   status: runStatusSchema,
   /** `monitoring` while `status === 'running'` and the agent is working on downstream work.
    *  Absent on old runs; cleared on resume/end. */
@@ -229,6 +235,10 @@ export const runRecordSchema = z.object({
   autoResumeAt: z.string().optional(),
   /** Consecutive automatic resumes since the last human turn, against the safety cap. */
   autoResumeAttempts: z.number().optional(),
+  /** ISO-8601 instant the run's session ended (inactivity, a crash, a restart) while a `CEZ:ASK`
+   *  question was still unanswered. Present only on a `failed` run; the cockpit keeps such a run
+   *  under "needs you" until the answer reopens it. Absent on records written before it existed. */
+  awaitingAnswerSince: z.string().optional(),
   createdAt: z.string(),
   startedAt: z.string().optional(),
   finishedAt: z.string().optional(),
@@ -365,6 +375,9 @@ export const runIndexEntrySchema = z.object({
    *  it, so without it here a cross-project row would show a red "failed" dot and land in
    *  Recently finished for work that is simply waiting for its appointment. */
   autoResumeAt: z.string().optional(),
+  /** A `failed` run whose session closed on an unanswered `CEZ:ASK` — `deriveAttention` reads it,
+   *  so a cross-project row says "needs you" like every other surface rather than "failed". */
+  awaitingAnswerSince: z.string().optional(),
   /** The workflow the run executes — the global Tasks page shows it in a column and groups by
    *  it. Always present on the record (`RunRecord.workflow`), so required here; the display
    *  refinement `workflowLabel` applies needs `steps[]`, which this row deliberately omits, so
@@ -377,6 +390,8 @@ export const runIndexEntrySchema = z.object({
    *  page needs to nest a child under its parent, and the child's `kind` so a row can say
    *  `review` or `implement` next to its title. Absent on a plain task. */
   dispatch: dispatchSchema.pick({ rootRunId: true, parentRunId: true, kind: true }).optional(),
+  /** The selected workspace role, kept compact in the cross-project run index. */
+  specialist: specialistRunIdentitySchema.optional(),
   /** When the agent actually started, as opposed to when the task was created. The global page's
    *  age column prefers it and falls back to `createdAt`, exactly as the per-project table does. */
   startedAt: z.string().optional(),

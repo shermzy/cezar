@@ -1,7 +1,8 @@
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { authStoreReady } from '../../workspace/auth.ts';
 import { CANCEL, PreflightError, type InstallContext, type InstallStep, type PlatformStrategy, type StepArtifact } from '../types.ts';
 import { brewInstallTool, brewRemoveHint, depCheckStep, HOSTNAME_RE, owned, shared, StepAborted, StepCancelled, verifyCommand } from '../steps.ts';
 
@@ -15,6 +16,21 @@ import { brewInstallTool, brewRemoveHint, depCheckStep, HOSTNAME_RE, owned, shar
 
 const PLIST_LABEL = 'ai.cezar.ngrok';
 const plistPath = (): string => join(homedir(), 'Library', 'LaunchAgents', `${PLIST_LABEL}.plist`);
+const authTrafficPolicyPath = (): string => join(homedir(), 'Library', 'Application Support', 'Cezar', 'ngrok-auth-traffic-policy.yml');
+
+export function ngrokAuthTrafficPolicy(): string {
+  return `on_http_request:
+  - actions:
+      - type: remove-headers
+        config:
+          headers:
+            - x-real-ip
+      - type: add-headers
+        config:
+          headers:
+            x-real-ip: "\${conn.client_ip}"
+`;
+}
 
 /**
  * `launchctl bootstrap` + proof the agent actually loaded. A discarded
@@ -37,8 +53,8 @@ function escapeXml(s: string): string {
 }
 
 /** launchd agent that keeps an authenticated ngrok tunnel to the local cockpit up. */
-export function launchdPlist(port: number, basicAuth: string, domain?: string, ngrokBin = '/opt/homebrew/bin/ngrok'): string {
-  const args = ['http', String(port), '--basic-auth', basicAuth];
+export function launchdPlist(port: number, basicAuth: string | undefined, domain?: string, ngrokBin = '/opt/homebrew/bin/ngrok', useClientIpPolicy = false): string {
+  const args = ['http', String(port), ...(useClientIpPolicy ? ['--traffic-policy-file', authTrafficPolicyPath()] : []), ...(basicAuth ? ['--basic-auth', basicAuth] : [])];
   if (domain) args.push('--domain', domain);
   // Escape every arg — a password/domain with `&`, `<`, `>` would otherwise
   // produce invalid plist XML and launchctl would silently fail to load it.
@@ -67,10 +83,12 @@ ${argXml}
 
 const ngrokStep: InstallStep = {
   id: 'ngrok',
-  title: 'ngrok tunnel (authtoken + domain + basic-auth)',
+  title: 'ngrok tunnel (authtoken + domain + authentication)',
   async check(ctx) {
     if (ctx.dryRun) return false;
-    return verifyCommand(ctx, 'test', ['-f', plistPath()]);
+    const policyRequired = managedAuthConfigured() || process.env.CEZ_AUTH_TRUST_PROXY === '1';
+    return (await verifyCommand(ctx, 'test', ['-f', plistPath()])) &&
+      (!policyRequired || await verifyCommand(ctx, 'test', ['-f', authTrafficPolicyPath()]));
   },
   async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
     // 1) ngrok present?
@@ -110,24 +128,30 @@ const ngrokStep: InstallStep = {
     // return undefined when the user accepts without typing over the placeholder.
     const domain = typeof domainInput === 'string' && domainInput.trim() ? domainInput.trim() : undefined;
 
-    // 4) basic-auth identity
-    const user = await ctx.ui.text({
-      message: 'Basic-auth username for the tunnel',
-      placeholder: 'ops',
-      validate: (v) => (v.trim() ? undefined : 'username is required'),
-    });
-    if (user === CANCEL) throw new StepCancelled();
-    const password = await ctx.ui.password({
-      message: `Basic-auth password for "${user}"`,
-      validate: (v) => (v.length >= 6 ? undefined : 'use at least 6 characters'),
-    });
-    if (password === CANCEL) throw new StepCancelled();
-    if (!ctx.dryRun && String(password).length < 6) {
-      throw new StepAborted('a basic-auth password (≥6 chars) is required — run server-install without --yes to set one');
+    // Keep the ngrok challenge until Cezar auth is both configured and live.
+    const managedAuthRequested = managedAuthConfigured();
+    const useClientIpPolicy = managedAuthRequested || process.env.CEZ_AUTH_TRUST_PROXY === '1';
+    const useManagedAuth = managedAuthRequested && !ctx.dryRun && await verifyManagedAuth(ctx);
+    let basicAuth: string | undefined;
+    if (!useManagedAuth) {
+      const user = await ctx.ui.text({
+        message: 'Basic-auth username for the tunnel',
+        placeholder: 'ops',
+        validate: (v) => (v.trim() ? undefined : 'username is required'),
+      });
+      if (user === CANCEL) throw new StepCancelled();
+      const password = await ctx.ui.password({
+        message: `Basic-auth password for "${user}"`,
+        validate: (v) => (v.length >= 6 ? undefined : 'use at least 6 characters'),
+      });
+      if (password === CANCEL) throw new StepCancelled();
+      if (!ctx.dryRun && String(password).length < 6) {
+        throw new StepAborted('a basic-auth password (≥6 chars) is required — run server-install without --yes to set one');
+      }
+      basicAuth = `${String(user)}:${String(password)}`;
     }
-    const basicAuth = `${String(user)}:${String(password)}`;
 
-    // 5) launchd agent (the plist embeds the basic-auth creds, like htpasswd on Linux)
+    // 5) launchd agent (the plist embeds optional basic-auth credentials)
     const path = plistPath();
     if (ctx.dryRun) {
       ctx.ui.info(`DRY RUN — would write ${path} and launchctl bootstrap it.`);
@@ -137,20 +161,58 @@ const ngrokStep: InstallStep = {
       const ngrokBin = (await ctx.runner.capture('bash', ['-lc', 'command -v ngrok'])).stdout.trim() || '/opt/homebrew/bin/ngrok';
 
       mkdirSync(join(homedir(), 'Library', 'LaunchAgents'), { recursive: true });
-      // 0600: unlike the Linux htpasswd (a hash, 0640 root:www-data), this file
-      // embeds the PLAINTEXT basic-auth credentials. `mode` only applies on
-      // create, so chmod too for re-installs over an existing 0644 plist.
-      writeFileSync(path, launchdPlist(ctx.state.primaryPort, basicAuth, domain, ngrokBin), { encoding: 'utf8', mode: 0o600 });
-      chmodSync(path, 0o600);
-
-      // Use the modern launchctl API — the legacy `launchctl load` returns
-      // error 5 (EIO) on recent macOS versions.
+      // 0600 protects the optional plaintext ngrok Basic Auth credentials.
       const uid = process.getuid ? process.getuid() : 0;
-      // Bootout any prior instance so re-installs don't collide.
-      await ctx.runner.capture('launchctl', ['bootout', `gui/${uid}/${PLIST_LABEL}`]);
-      await bootstrapVerified(ctx, uid, PLIST_LABEL, path, 'the ngrok tunnel agent');
+      const policyPath = authTrafficPolicyPath();
+      let priorPlist: string | undefined;
+      let priorPolicy: string | undefined;
+      if (existsSync(path)) {
+        try { priorPlist = readFileSync(path, 'utf8'); }
+        catch { throw new StepAborted(`cannot read ${path}; refusing to rewrite the authenticated ngrok tunnel`); }
+      }
+      if (useClientIpPolicy && existsSync(policyPath)) {
+        try { priorPolicy = readFileSync(policyPath, 'utf8'); }
+        catch { throw new StepAborted(`cannot read ${policyPath}; refusing to rewrite the ngrok client-IP policy`); }
+      }
+      try {
+        if (useClientIpPolicy) {
+          mkdirSync(dirname(policyPath), { recursive: true, mode: 0o700 });
+          chmodSync(dirname(policyPath), 0o700);
+          writeFileSync(policyPath, ngrokAuthTrafficPolicy(), { encoding: 'utf8', mode: 0o600 });
+          chmodSync(policyPath, 0o600);
+        }
+        writeFileSync(path, launchdPlist(ctx.state.primaryPort, basicAuth, domain, ngrokBin, useClientIpPolicy), { encoding: 'utf8', mode: 0o600 });
+        chmodSync(path, 0o600);
+        // Use the modern launchctl API — the legacy `launchctl load` returns
+        // error 5 (EIO) on recent macOS versions.
+        await ctx.runner.capture('launchctl', ['bootout', `gui/${uid}/${PLIST_LABEL}`]);
+        await bootstrapVerified(ctx, uid, PLIST_LABEL, path, 'the ngrok tunnel agent');
+      } catch (error) {
+        try {
+          if (useClientIpPolicy) {
+            if (priorPolicy === undefined) rmSync(policyPath, { force: true });
+            else {
+              writeFileSync(policyPath, priorPolicy, { encoding: 'utf8', mode: 0o600 });
+              chmodSync(policyPath, 0o600);
+            }
+          }
+          if (priorPlist !== undefined) {
+            writeFileSync(path, priorPlist, { encoding: 'utf8', mode: 0o600 });
+            chmodSync(path, 0o600);
+            await ctx.runner.capture('launchctl', ['bootout', `gui/${uid}/${PLIST_LABEL}`]);
+            await bootstrapVerified(ctx, uid, PLIST_LABEL, path, 'the restored ngrok tunnel agent');
+          } else {
+            rmSync(path, { force: true });
+          }
+        } catch {
+          throw new StepAborted(`ngrok tunnel reconfiguration failed and its previous plist or policy could not be restored; recover ${path} before exposing the tunnel`);
+        }
+        if (priorPlist !== undefined) throw new StepAborted(`ngrok tunnel reconfiguration failed; the previous tunnel was restored. ${error instanceof Error ? error.message : ''}`);
+        throw error;
+      }
     }
 
+    if (useManagedAuth) ctx.ui.note('Cezar login is active; ngrok Basic Auth is not required.', 'ngrok');
     if (domain) {
       ctx.state.publicUrl = `https://${domain}`;
       ctx.state.ephemeral = false;
@@ -177,6 +239,7 @@ const ngrokStep: InstallStep = {
       const uid = process.getuid ? process.getuid() : 0;
       await ctx.runner.capture('launchctl', ['bootout', `gui/${uid}/${PLIST_LABEL}`]);
       rmSync(path, { force: true });
+      rmSync(authTrafficPolicyPath(), { force: true });
     }
     const cfg = (created?.artifacts ?? []).find((a) => a.type === 'ngrok-config');
     if (cfg) {
@@ -193,6 +256,119 @@ const ngrokStep: InstallStep = {
 const CEZAR_PLIST_LABEL = 'ai.cezar.cockpit';
 const OFFICIAL_CLI_PKG = 'cezar-cli';
 const cezarPlistPath = (): string => join(homedir(), 'Library', 'LaunchAgents', `${CEZAR_PLIST_LABEL}.plist`);
+
+function managedAuthConfigured(): boolean {
+  if (process.env.CEZ_AUTH_REQUIRED === '1') return true;
+  try {
+    const launcher = readFileSync(cezarPlistPath(), 'utf8');
+    return launcher.match(/<key>CEZ_AUTH_REQUIRED<\/key>\s*<string>(.*?)<\/string>/s)?.[1] === '1';
+  } catch {
+    return false;
+  }
+}
+
+async function verifyManagedAuth(ctx: InstallContext): Promise<boolean> {
+  try {
+    const base = `http://127.0.0.1:${ctx.state.primaryPort}/api/v1`;
+    const session = await ctx.runner.capture('curl', ['-sS', '-w', '\n%{http_code}', `${base}/auth/session`]);
+    const sessionLines = session.stdout.split('\n');
+    const sessionCode = sessionLines.pop()?.trim();
+    let sessionBody: { authRequired?: unknown; authenticated?: unknown } = {};
+    try { sessionBody = JSON.parse(sessionLines.join('\n')) as typeof sessionBody; } catch { /* fail below */ }
+    const protectedRequest = await ctx.runner.capture('curl', ['-sS', '-o', '/dev/null', '-w', '%{http_code}', `${base}/projects`]);
+    // The anonymous gate responds before bootstrap and while the store cannot
+    // be written. Keep proxy Basic Auth until the local owner store is ready.
+    return session.code === 0 && sessionCode === '200' && sessionBody.authRequired === true && sessionBody.authenticated === false && protectedRequest.stdout.trim() === '401' && authStoreReady();
+  } catch {
+    return false;
+  }
+}
+
+function removeNgrokBasicAuth(plist: string): string {
+  if (!plist.includes('<!-- Managed by cezar server-install') || !plist.includes(`<string>${PLIST_LABEL}</string>`)) {
+    throw new StepAborted('ngrok launchd plist is not a recognized Cezar-managed file; refusing to remove its authentication settings');
+  }
+  const lines = plist.split(/\r?\n/);
+  const flag = lines.findIndex((line) => line.trim() === '<string>--basic-auth</string>');
+  if (flag < 0) return plist;
+  if (!lines[flag + 1]?.trim().match(/^<string>.*<\/string>$/)) {
+    throw new StepAborted('ngrok Basic Auth arguments are malformed; refusing to rewrite its launchd plist');
+  }
+  lines.splice(flag, 2);
+  return lines.join('\n');
+}
+
+function ensureNgrokAuthPolicy(plist: string): string {
+  if (!plist.includes('<!-- Managed by cezar server-install') || !plist.includes(`<string>${PLIST_LABEL}</string>`)) {
+    throw new StepAborted('ngrok launchd plist is not a recognized Cezar-managed file; refusing to change its traffic policy');
+  }
+  const lines = plist.split(/\r?\n/);
+  const flag = lines.findIndex((line) => line.trim() === '<string>--traffic-policy-file</string>');
+  const expectedPath = `<string>${escapeXml(authTrafficPolicyPath())}</string>`;
+  if (flag >= 0) {
+    if (lines[flag + 1]?.trim() === expectedPath) return plist;
+    throw new StepAborted('ngrok already uses a different traffic policy; refusing to replace its policy during managed-auth setup');
+  }
+  const http = lines.findIndex((line) => line.trim() === '<string>http</string>');
+  if (http < 0 || !/^<string>\d+<\/string>$/.test(lines[http + 1]?.trim() ?? '')) {
+    throw new StepAborted('ngrok launchd arguments are malformed; refusing to add the managed client-IP policy');
+  }
+  lines.splice(http + 2, 0, `      <string>--traffic-policy-file</string>`, `      ${expectedPath}`);
+  return lines.join('\n');
+}
+
+async function cutoverNgrokToManagedAuth(ctx: InstallContext): Promise<void> {
+  const path = plistPath();
+  if (!existsSync(path)) return;
+  let previous: string;
+  try { previous = readFileSync(path, 'utf8'); }
+  catch { throw new StepAborted(`cannot read ${path}; refusing to change ngrok authentication`); }
+  const policyPath = authTrafficPolicyPath();
+  const uid = process.getuid ? process.getuid() : 0;
+  const reload = async (contents: string, what: string) => {
+    writeFileSync(path, contents, { encoding: 'utf8', mode: 0o600 });
+    chmodSync(path, 0o600);
+    await ctx.runner.capture('launchctl', ['bootout', `gui/${uid}/${PLIST_LABEL}`]);
+    await bootstrapVerified(ctx, uid, PLIST_LABEL, path, what);
+  };
+
+  const previousPolicy = existsSync(policyPath) ? readFileSync(policyPath, 'utf8') : undefined;
+  const policyReady = ensureNgrokAuthPolicy(previous);
+  const policyDirectory = dirname(policyPath);
+  mkdirSync(policyDirectory, { recursive: true, mode: 0o700 });
+  chmodSync(policyDirectory, 0o700);
+  writeFileSync(policyPath, ngrokAuthTrafficPolicy(), { encoding: 'utf8', mode: 0o600 });
+  chmodSync(policyPath, 0o600);
+  if (policyReady !== previous) {
+    try {
+      await reload(policyReady, 'the ngrok tunnel agent with trusted client IPs');
+    } catch (error) {
+      try {
+        if (previousPolicy === undefined) rmSync(policyPath, { force: true });
+        else writeFileSync(policyPath, previousPolicy, { encoding: 'utf8', mode: 0o600 });
+        await reload(previous, 'the restored ngrok tunnel agent');
+      } catch {
+        throw new StepAborted(`could not install the ngrok client-IP policy or restore ${path}; keep the tunnel behind Basic Auth until the agent is repaired`);
+      }
+      throw new StepAborted(`could not install the ngrok client-IP policy; the previous tunnel and Basic Auth were restored. ${error instanceof Error ? error.message : ''}`);
+    }
+  }
+
+  const next = removeNgrokBasicAuth(policyReady);
+  if (next === policyReady || !await verifyManagedAuth(ctx)) {
+    if (next !== policyReady) ctx.ui.warn('Managed login is not ready yet; ngrok Basic Auth stays in place. Bootstrap or repair the owner locally, then rerun `cezar server-install --reconfigure autostart`.');
+    return;
+  }
+
+  try {
+    await reload(next, 'the managed-auth ngrok tunnel agent');
+  } catch (error) {
+    try { await reload(policyReady, 'the restored ngrok tunnel agent'); }
+    catch { throw new StepAborted(`ngrok auth cutover failed and Basic Auth rollback could not be verified; restore ${path} from its last known-good copy before exposing the tunnel`); }
+    throw new StepAborted(`ngrok auth cutover failed; Basic Auth was restored. ${error instanceof Error ? error.message : ''}`);
+  }
+  ctx.ui.success('Managed Cezar login was verified; ngrok Basic Auth is removed and TLS remains enabled.');
+}
 
 /** Resolve the argv array for the cezar launchd agent, mirroring how the CLI was launched. */
 async function resolveCezarArgv(ctx: InstallContext): Promise<string[]> {
@@ -217,7 +393,15 @@ async function resolveCezarArgv(ctx: InstallContext): Promise<string[]> {
 }
 
 /** launchd agent that keeps the cezar cockpit running on the given port. */
-export function cezarLaunchdPlist(repoRoot: string, port: number, argv: string[], instanceId?: string): string {
+export function cezarLaunchdPlist(
+  repoRoot: string,
+  port: number,
+  argv: string[],
+  instanceId?: string,
+  authRequired = process.env.CEZ_AUTH_REQUIRED === '1',
+  trustProxy = authRequired || process.env.CEZ_AUTH_TRUST_PROXY === '1',
+  cezarHome?: string,
+): string {
   // Give the agent the operator's PATH so cezar can spawn claude/gh/codex.
   const pathDirs = [dirname(process.execPath), ...(process.env.PATH ?? '').split(':'), '/usr/local/bin', '/usr/bin', '/bin']
     .filter((d, i, a) => d && d !== '.' && a.indexOf(d) === i);
@@ -240,8 +424,10 @@ ${argXml}
     <dict>
       <key>CEZ_REMOTE</key>
       <string>1</string>
-${instanceId ? `      <key>CEZ_INSTANCE_ID</key>\n      <string>${escapeXml(instanceId)}</string>\n` : ''}      <key>PATH</key>
+${instanceId ? `      <key>CEZ_INSTANCE_ID</key>\n      <string>${escapeXml(instanceId)}</string>\n` : ''}${cezarHome ? `      <key>CEZ_HOME</key>\n      <string>${escapeXml(cezarHome)}</string>\n` : ''}      <key>PATH</key>
       <string>${escapeXml(pathDirs.join(':'))}</string>
+${authRequired ? '      <key>CEZ_AUTH_REQUIRED</key>\n      <string>1</string>\n' : ''}
+${trustProxy ? '      <key>CEZ_AUTH_TRUST_PROXY</key>\n      <string>1</string>\n' : ''}
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -262,15 +448,50 @@ const autostartStep: InstallStep = {
   async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
     const argv = await resolveCezarArgv(ctx);
     const path = cezarPlistPath();
+    let authRequired = process.env.CEZ_AUTH_REQUIRED === '1';
+    const cezarHome = process.env.CEZ_HOME ? resolve(process.env.CEZ_HOME) : undefined;
+    let previousPlist: string | undefined;
+    if (!ctx.dryRun && existsSync(path)) {
+      let previous: string;
+      try { previous = readFileSync(path, 'utf8'); }
+      catch { throw new StepAborted(`cannot read ${path}; refusing to rewrite a launcher that may require managed authentication`); }
+      previousPlist = previous;
+      const priorSetting = previous.match(/<key>CEZ_AUTH_REQUIRED<\/key>\s*<string>(.*?)<\/string>/s);
+      if (previous.includes('CEZ_AUTH_REQUIRED') && !priorSetting) {
+        throw new StepAborted(`cannot read the managed-auth setting in ${path}; refusing to rewrite the launcher`);
+      }
+      authRequired ||= priorSetting?.[1] === '1';
+      const priorHome = previous.match(/<key>CEZ_HOME<\/key>\s*<string>(.*?)<\/string>/s);
+      if ((previous.includes('<key>CEZ_HOME</key>') && !priorHome) || (priorHome && priorHome[1] !== escapeXml(cezarHome ?? ''))) {
+        throw new StepAborted(`existing ${path} sets CEZ_HOME differently; rerun with the same CEZ_HOME before rewriting the service`);
+      }
+    }
     if (ctx.dryRun) {
       ctx.ui.info(`DRY RUN — would write ${path} and launchctl bootstrap it.`);
     } else {
       mkdirSync(join(homedir(), 'Library', 'LaunchAgents'), { recursive: true });
-      writeFileSync(path, cezarLaunchdPlist(ctx.repoRoot, ctx.state.primaryPort, argv, ctx.state.instanceId), { encoding: 'utf8', mode: 0o600 });
-      chmodSync(path, 0o600);
       const uid = process.getuid ? process.getuid() : 0;
-      await ctx.runner.capture('launchctl', ['bootout', `gui/${uid}/${CEZAR_PLIST_LABEL}`]);
-      await bootstrapVerified(ctx, uid, CEZAR_PLIST_LABEL, path, 'the cezar cockpit agent');
+      try {
+        writeFileSync(path, cezarLaunchdPlist(ctx.repoRoot, ctx.state.primaryPort, argv, ctx.state.instanceId, authRequired, authRequired || process.env.CEZ_AUTH_TRUST_PROXY === '1', cezarHome), { encoding: 'utf8', mode: 0o600 });
+        chmodSync(path, 0o600);
+        await ctx.runner.capture('launchctl', ['bootout', `gui/${uid}/${CEZAR_PLIST_LABEL}`]);
+        await bootstrapVerified(ctx, uid, CEZAR_PLIST_LABEL, path, 'the cezar cockpit agent');
+      } catch (error) {
+        try {
+          await ctx.runner.capture('launchctl', ['bootout', `gui/${uid}/${CEZAR_PLIST_LABEL}`]);
+          if (previousPlist === undefined) rmSync(path, { force: true });
+          else {
+            writeFileSync(path, previousPlist, { encoding: 'utf8', mode: 0o600 });
+            chmodSync(path, 0o600);
+            await bootstrapVerified(ctx, uid, CEZAR_PLIST_LABEL, path, 'the restored cezar cockpit agent');
+          }
+        } catch {
+          throw new StepAborted(`cezar service reconfiguration failed and the previous launchd plist could not be restored; recover ${path} before exposing the tunnel`);
+        }
+        if (previousPlist !== undefined) throw new StepAborted(`cezar service reconfiguration failed; the previous launchd agent was restored. ${error instanceof Error ? error.message : ''}`);
+        throw error;
+      }
+      if (authRequired) await cutoverNgrokToManagedAuth(ctx);
     }
     return { artifacts: [owned('launchd', { name: CEZAR_PLIST_LABEL, path })] };
   },
@@ -289,13 +510,13 @@ const autostartStep: InstallStep = {
 
 export const macosxNgrokIdentityStep: InstallStep = {
   id: 'identity',
-  title: 'Identity check (ngrok basic-auth active)',
+  title: 'Identity check (ngrok tunnel and cockpit)',
   async check() {
     return false;
   },
   async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
     if (ctx.dryRun) {
-      ctx.ui.info('DRY RUN — would confirm the ngrok tunnel is up and basic-auth is enforced.');
+      ctx.ui.info('DRY RUN — would confirm the ngrok tunnel is up and the cockpit identity matches.');
       return { artifacts: [] };
     }
     // ngrok needs a moment after launchctl bootstrap to bind to :4040.
@@ -335,7 +556,7 @@ export const macosxNgrokIdentityStep: InstallStep = {
     if (identity === 'inconclusive') {
       ctx.ui.warn('ngrok is up, but the cockpit instance identity check could not run (older or invalid health payload).');
     } else {
-      ctx.ui.success('ngrok tunnel is up (basic-auth enforced at the ngrok edge) and the cockpit identity matches.');
+      ctx.ui.success('ngrok tunnel is up and the cockpit instance identity matches.');
     }
     return { artifacts: [] };
   },

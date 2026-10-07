@@ -160,7 +160,9 @@ describe('workspace config', () => {
     const config = await loadWorkspaceConfig();
     expect(config.schemaVersion).toBe(1);
     expect(config.resources.maxParallel).toBe(4);
-    expect(config.projects).toEqual([project('cezar')]);
+    expect(config.projects).toHaveLength(1);
+    expect(config.projects[0]).toMatchObject(project('cezar'));
+    expect(config.projects[0]?.entryId).toEqual(expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i));
   });
 
   it('a corrupt file degrades to defaults with one warning and is left on disk untouched', async () => {

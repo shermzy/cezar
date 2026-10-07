@@ -1,14 +1,16 @@
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { authStoreReady } from '../../workspace/auth.ts';
 import { CANCEL, PreflightError, type InstallContext, type InstallStep, type PlatformStrategy, type StepArtifact } from '../types.ts';
 import { depCheckStep, generatePassword, owned, shared, shquote, StepAborted, StepCancelled, StepSkipped, sudoStep, verifyCommand } from '../steps.ts';
 
 /**
- * The `ubuntu-vps` strategy: stand up an authenticated, proxied cezar on a bare
- * Ubuntu/Debian VPS. cezar itself stays loopback-bound; nginx is the single
- * public surface (TLS + htpasswd identity) forwarding to 127.0.0.1:<port>.
+ * The `ubuntu-vps` strategy: stand up a proxied cezar on a bare Ubuntu/Debian
+ * VPS. The default nginx site uses TLS + htpasswd; managed Cezar auth can
+ * replace the Basic Auth challenge after the local API gate is verified.
  *
  * Phase 1 ships deps → nginx+htpasswd → identity-verify (and their `undo`s).
  * Phase 2 appends the optional SSL and autostart steps to `steps()`.
@@ -783,6 +785,9 @@ export function systemdUnit(
   execStart: string,
   bindHost?: string,
   instanceId?: string,
+  authRequired = process.env.CEZ_AUTH_REQUIRED === '1',
+  trustProxy = authRequired || process.env.CEZ_AUTH_TRUST_PROXY === '1',
+  cezarHome?: string,
 ): string {
   const userLine = scope === 'system' ? `User=${userInfo().username}\n` : '';
   const installTarget = scope === 'system' ? 'multi-user.target' : 'default.target';
@@ -808,14 +813,63 @@ Wants=network-online.target
 Type=simple
 ${userLine}WorkingDirectory=${repoRoot}
 Environment=CEZ_REMOTE=1
-${instanceId ? `Environment=CEZ_INSTANCE_ID=${sysd(instanceId)}\n` : ''}Environment=PATH=${sysd(pathDirs.join(':'))}
-ExecStart=${sysd(execStart)} serve --no-open --port ${port}${sysd(bind)}
+${instanceId ? `Environment=CEZ_INSTANCE_ID=${sysd(instanceId)}\n` : ''}${cezarHome ? `${systemdHomeEnvironment(cezarHome)}\n` : ''}Environment=PATH=${sysd(pathDirs.join(':'))}
+${authRequired ? 'Environment=CEZ_AUTH_REQUIRED=1\n' : ''}${trustProxy ? 'Environment=CEZ_AUTH_TRUST_PROXY=1\n' : ''}ExecStart=${sysd(execStart)} serve --no-open --port ${port}${sysd(bind)}
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=${installTarget}
 `;
+}
+
+function systemdHomeEnvironment(home: string): string {
+  if (/[\r\n\0]/.test(home)) throw new StepAborted('CEZ_HOME must be a single filesystem path');
+  return `Environment="CEZ_HOME=${home.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%')}"`;
+}
+
+function assertServiceHomePreserved(unit: string, home: string | undefined): void {
+  const expected = home ? systemdHomeEnvironment(home) : undefined;
+  for (const path of [join(homedir(), '.config', 'systemd', 'user', unit), join('/etc', 'systemd', 'system', unit)]) {
+    const files = [path];
+    const dropInDir = `${path}.d`;
+    if (existsSync(dropInDir)) files.push(...readdirSync(dropInDir).filter((name) => name.endsWith('.conf')).map((name) => join(dropInDir, name)));
+    for (const file of files) {
+      if (!existsSync(file)) continue;
+      let contents: string;
+      try { contents = readFileSync(file, 'utf8'); }
+      catch { throw new StepAborted(`cannot read ${file}; refusing to change the service workspace home`); }
+      for (const line of contents.split(/\r?\n/)) {
+        if (!line.includes('CEZ_HOME')) continue;
+        if (line !== expected) throw new StepAborted(`existing ${file} sets CEZ_HOME differently; rerun with the same CEZ_HOME before rewriting the service`);
+      }
+    }
+  }
+}
+
+async function serviceAuthRequired(ctx: InstallContext, scope: 'user' | 'system', unit: string): Promise<boolean> {
+  if (process.env.CEZ_AUTH_REQUIRED === '1') return true;
+  // Preserve the installed setting even if reconfigure changes systemd scope.
+  const managedUnitPaths = [
+    join(homedir(), '.config', 'systemd', 'user', unit),
+    join('/etc', 'systemd', 'system', unit),
+  ];
+  const authSetting = /(?:^|[\s="'])CEZ_AUTH_REQUIRED=1(?:[\s"']|$)/;
+  for (const path of managedUnitPaths) {
+    if (existsSync(path) && authSetting.test(readFileSync(path, 'utf8'))) return true;
+    const dropInDir = `${path}.d`;
+    if (existsSync(dropInDir) && readdirSync(dropInDir).some((name) =>
+      name.endsWith('.conf') && authSetting.test(readFileSync(join(dropInDir, name), 'utf8')),
+    )) return true;
+  }
+  if (ctx.dryRun) return false;
+  const result = await ctx.runner.capture('systemctl', [...(scope === 'user' ? ['--user'] : []), 'show', unit, '-p', 'Environment']);
+  if (result.code !== 0) {
+    const existingUnit = managedUnitPaths.some((path) => existsSync(path) || existsSync(`${path}.d`));
+    if (existingUnit) throw new Error('Unable to verify the existing systemd auth setting; refusing to rewrite the service unit.');
+    return false;
+  }
+  return authSetting.test(result.stdout);
 }
 
 /** Our official npm package/alias — what `npx <this>` reinstalls the CLI as. */
@@ -956,6 +1010,53 @@ async function readExecStart(ctx: InstallContext, scope: 'user' | 'system', unit
   return stdout;
 }
 
+async function managedAuthIsReady(ctx: InstallContext): Promise<boolean> {
+  try {
+    const base = `http://${upstreamHost(ctx)}:${ctx.state.primaryPort}/api/v1`;
+    const session = await curlResponse(ctx, [`${base}/auth/session`]);
+    const projects = await curlCode(ctx, [`${base}/projects`]);
+    const body = JSON.parse(session.body) as { authRequired?: unknown; authenticated?: unknown };
+    // Anonymous responses prove only that the gate is enabled. They still look
+    // healthy before owner bootstrap or after the store becomes unavailable.
+    return session.code === '200' && body.authRequired === true && body.authenticated === false && projects === '401' && authStoreReady();
+  } catch {
+    return false;
+  }
+}
+
+async function cutoverNginxToManagedAuth(ctx: InstallContext): Promise<void> {
+  const path = vhostAvailable(ctx);
+  const current = await ctx.runner.capture('cat', [path]);
+  if (current.code !== 0 || !current.stdout.includes('# Managed by cezar server-install')) {
+    ctx.ui.warn(`Could not verify the managed nginx site at ${path}; leaving its Basic Auth challenge in place.`);
+    return;
+  }
+  const hasAuthBasic = /^\s*auth_basic\s/m.test(current.stdout);
+  const hasAuthFile = /^\s*auth_basic_user_file\s/m.test(current.stdout);
+  if (!hasAuthBasic && !hasAuthFile) return;
+  if (!hasAuthBasic || !hasAuthFile) {
+    ctx.ui.warn(`The nginx Basic Auth directives in ${path} are incomplete; leaving the site unchanged.`);
+    return;
+  }
+  if (!await managedAuthIsReady(ctx)) {
+    ctx.ui.warn('Managed login is not ready yet; nginx Basic Auth stays in place. Bootstrap or repair the owner locally, then rerun `cezar server-install --reconfigure autostart`.');
+    return;
+  }
+
+  const backup = `${path}.cezar-auth-rollback`;
+  const sedProgram = '/^[[:space:]]*auth_basic(_user_file)?[[:space:]]/d';
+  const command =
+    `cp -p ${shquote(path)} ${shquote(backup)} && sed -i -E ${shquote(sedProgram)} ${shquote(path)} && ` +
+    `if nginx -t && systemctl reload nginx; then rm -f ${shquote(backup)}; ` +
+    `else cp -p ${shquote(backup)} ${shquote(path)} && nginx -t && systemctl reload nginx && rm -f ${shquote(backup)}; exit 1; fi`;
+  await sudoStep(ctx, {
+    description: 'Remove nginx Basic Auth after verifying Cezar logins; preserve TLS and roll back the site if nginx rejects the change.',
+    command,
+    verify: async (c) => !(await verifyCommand(c, 'grep', ['-Eq', '^[[:space:]]*auth_basic(_user_file)?[[:space:]]', path])),
+  });
+  ctx.ui.success('Managed Cezar login was verified; nginx Basic Auth is removed and TLS remains enabled.');
+}
+
 const autostartStep: InstallStep = {
   id: 'autostart',
   // Required: after install the cockpit must actually be serving, so cezar runs
@@ -968,6 +1069,8 @@ const autostartStep: InstallStep = {
   async run(ctx): Promise<{ artifacts: StepArtifact[] }> {
     const UNIT_NAME = unitName(ctx);
     const execStart = await resolveExecStart(ctx);
+    const cezarHome = process.env.CEZ_HOME ? resolve(process.env.CEZ_HOME) : undefined;
+    assertServiceHomePreserved(UNIT_NAME, cezarHome);
     // Prefer a rootless `systemd --user` service + linger; fall back to a system
     // unit (via sudoStep) when the user bus is not reachable. `show-environment`
     // exits 0 iff the user manager is up — on a headless SSH box with no session
@@ -975,20 +1078,44 @@ const autostartStep: InstallStep = {
     const userBus = ctx.dryRun ? true : (await ctx.runner.capture('systemctl', ['--user', 'show-environment'])).code === 0;
 
     if (userBus) {
+      const authRequired = await serviceAuthRequired(ctx, 'user', UNIT_NAME);
       const unitPath = join(homedir(), '.config', 'systemd', 'user', UNIT_NAME);
       if (ctx.dryRun) {
         ctx.ui.info(`DRY RUN — would write ${unitPath} and enable it (systemctl --user enable --now cezar).`);
       } else {
         mkdirSync(join(homedir(), '.config', 'systemd', 'user'), { recursive: true });
-        writeFileSync(
-          unitPath,
-          systemdUnit(ctx.repoRoot, ctx.state.primaryPort, 'user', execStart, ctx.state.bindHost, ctx.state.instanceId),
-          'utf8',
-        );
-        await ctx.runner.interactive('systemctl', ['--user', 'daemon-reload']);
-        await ctx.runner.interactive('systemctl', ['--user', 'enable', '--now', UNIT_NAME]);
-        if ((await ctx.runner.capture('systemctl', ['--user', 'is-enabled', UNIT_NAME])).code !== 0) {
-          ctx.ui.warn('The user service did not enable cleanly — check `systemctl --user status cezar`.');
+        let previousUnit: string | undefined;
+        if (existsSync(unitPath)) {
+          try { previousUnit = readFileSync(unitPath, 'utf8'); }
+          catch { throw new StepAborted(`cannot read ${unitPath}; refusing to rewrite the existing service`); }
+        }
+        try {
+          writeFileSync(
+            unitPath,
+            systemdUnit(ctx.repoRoot, ctx.state.primaryPort, 'user', execStart, ctx.state.bindHost, ctx.state.instanceId, authRequired, process.env.CEZ_AUTH_TRUST_PROXY === '1' || (authRequired && !ctx.state.externalProxy), cezarHome),
+            'utf8',
+          );
+          if (await ctx.runner.interactive('systemctl', ['--user', 'daemon-reload']) !== 0) throw new StepAborted('systemd user daemon-reload failed');
+          if (await ctx.runner.interactive('systemctl', ['--user', 'enable', '--now', UNIT_NAME]) !== 0) throw new StepAborted('systemd user service enable failed');
+          if (await ctx.runner.interactive('systemctl', ['--user', 'restart', UNIT_NAME]) !== 0) throw new StepAborted('systemd user service restart failed');
+          if ((await ctx.runner.capture('systemctl', ['--user', 'is-enabled', UNIT_NAME])).code !== 0) throw new StepAborted('systemd user service did not enable');
+          await confirmCezarRunning(ctx, 'systemctl --user status cezar', 'journalctl --user -u cezar -n 50 --no-pager');
+        } catch (error) {
+          try {
+            if (previousUnit === undefined) {
+              await ctx.runner.interactive('systemctl', ['--user', 'disable', '--now', UNIT_NAME]);
+              rmSync(unitPath, { force: true });
+              if (await ctx.runner.interactive('systemctl', ['--user', 'daemon-reload']) !== 0) throw new Error('daemon-reload failed');
+            } else {
+              writeFileSync(unitPath, previousUnit, 'utf8');
+              if (await ctx.runner.interactive('systemctl', ['--user', 'daemon-reload']) !== 0) throw new Error('daemon-reload failed');
+              if (await ctx.runner.interactive('systemctl', ['--user', 'restart', UNIT_NAME]) !== 0) throw new Error('restart failed');
+            }
+          } catch {
+            throw new StepAborted(`service reconfiguration failed and ${unitPath} could not be restored; repair the user service before exposing it`);
+          }
+          if (previousUnit !== undefined) throw new StepAborted(`service reconfiguration failed; the previous user unit was restored. ${error instanceof Error ? error.message : ''}`);
+          throw error;
         }
       }
       // Linger lets the user service survive logout / start at boot — usually
@@ -1007,22 +1134,82 @@ const autostartStep: InstallStep = {
             r.stdout.includes('Linger=yes'),
           ),
       });
-      await confirmCezarRunning(ctx, 'systemctl --user status cezar', 'journalctl --user -u cezar -n 50 --no-pager');
+      if (ctx.dryRun) await confirmCezarRunning(ctx, 'systemctl --user status cezar', 'journalctl --user -u cezar -n 50 --no-pager');
+      if (authRequired && !ctx.state.externalProxy) await cutoverNginxToManagedAuth(ctx);
       const artifacts: StepArtifact[] = [owned('service', { name: UNIT_NAME, scope: 'user', path: unitPath })];
       if (!lingerWasOn) artifacts.push(owned('linger', { name: osUser }));
       return { artifacts };
     }
 
     // System unit fallback.
-    await writeFileStep(ctx, {
-      description: 'Install the cezar systemd unit, start it now, and enable it at boot.',
-      path: `/etc/systemd/system/${UNIT_NAME}`,
-      content: systemdUnit(ctx.repoRoot, ctx.state.primaryPort, 'system', execStart, ctx.state.bindHost, ctx.state.instanceId),
-      extra: `systemctl daemon-reload && systemctl enable --now ${UNIT_NAME}`,
-      verify: (c) => verifyCommand(c, 'systemctl', ['is-enabled', UNIT_NAME]),
-    });
-    await confirmCezarRunning(ctx, 'sudo systemctl status cezar', 'sudo journalctl -u cezar -n 50 --no-pager');
-    return { artifacts: [owned('service', { name: UNIT_NAME, scope: 'system', path: `/etc/systemd/system/${UNIT_NAME}` })] };
+    const authRequired = await serviceAuthRequired(ctx, 'system', UNIT_NAME);
+    const unitPath = `/etc/systemd/system/${UNIT_NAME}`;
+    const content = systemdUnit(ctx.repoRoot, ctx.state.primaryPort, 'system', execStart, ctx.state.bindHost, ctx.state.instanceId, authRequired, process.env.CEZ_AUTH_TRUST_PROXY === '1' || (authRequired && !ctx.state.externalProxy), cezarHome);
+    const old = ctx.dryRun ? { code: 1, stdout: '' } : await ctx.runner.capture('cat', [unitPath]);
+    if (!ctx.dryRun && old.code !== 0 && await verifyCommand(ctx, 'test', ['-f', unitPath])) {
+      throw new StepAborted(`cannot read ${unitPath}; refusing to rewrite the existing service`);
+    }
+    const previousUnit = old.code === 0 ? old.stdout : undefined;
+    const nonce = randomUUID();
+    const backup = `${unitPath}.cezar-reconfigure-rollback-${nonce}`;
+    const activated = `${unitPath}.cezar-activated-${nonce}`;
+    const installCommand = `${previousUnit === undefined ? '' : `cp -p ${shquote(unitPath)} ${shquote(backup)} && `}` +
+      `${writeRootFileCmd(unitPath, content)} && systemctl daemon-reload && systemctl enable --now ${shquote(UNIT_NAME)} && ` +
+      `systemctl restart ${shquote(UNIT_NAME)} && touch ${shquote(activated)}`;
+    const verifyReplacement = async (c: InstallContext) => {
+      const file = await c.runner.capture('cat', [unitPath]);
+      return file.code === 0 && file.stdout === content &&
+        await verifyCommand(c, 'test', ['-f', activated]) &&
+        await verifyCommand(c, 'systemctl', ['is-enabled', UNIT_NAME]) &&
+        await verifyCommand(c, 'systemctl', ['is-active', UNIT_NAME]);
+    };
+    try {
+      await sudoStep(ctx, {
+        description: 'Install the cezar systemd unit, restart it, and enable it at boot.',
+        note: `This writes ${unitPath} with exactly this content:\n\n${content}`,
+        command: installCommand,
+        verify: verifyReplacement,
+      });
+      await confirmCezarRunning(ctx, 'sudo systemctl status cezar', 'sudo journalctl -u cezar -n 50 --no-pager');
+    } catch (error) {
+      if (ctx.dryRun) throw error;
+      const current = await ctx.runner.capture('cat', [unitPath]);
+      if (previousUnit !== undefined && current.code === 0 && current.stdout === previousUnit) {
+        throw new StepAborted(`service reconfiguration failed; the previous system unit remains in place. ${error instanceof Error ? error.message : ''}`);
+      }
+      const restoreCommand = previousUnit === undefined
+        ? `systemctl disable --now ${shquote(UNIT_NAME)} || true; rm -f ${shquote(unitPath)} ${shquote(backup)} ${shquote(activated)}; systemctl daemon-reload`
+        : `cp -p ${shquote(backup)} ${shquote(unitPath)} && systemctl daemon-reload && systemctl restart ${shquote(UNIT_NAME)} && rm -f ${shquote(backup)} ${shquote(activated)}`;
+      try {
+        await sudoStep(ctx, {
+          description: 'Restore the previous cezar system service after failed reconfiguration.',
+          command: restoreCommand,
+          verify: async (c) => {
+            const file = await c.runner.capture('cat', [unitPath]);
+            return previousUnit === undefined
+              ? file.code !== 0 && !(await verifyCommand(c, 'systemctl', ['is-active', UNIT_NAME]))
+              : file.code === 0 && file.stdout === previousUnit && await verifyCommand(c, 'systemctl', ['is-active', UNIT_NAME]);
+          },
+        });
+      } catch {
+        throw new StepAborted(`service reconfiguration failed and ${unitPath} could not be restored; use ${backup} to recover the previous unit`);
+      }
+      if (previousUnit !== undefined) throw new StepAborted(`service reconfiguration failed; the previous system unit was restored. ${error instanceof Error ? error.message : ''}`);
+      throw error;
+    }
+    if (!ctx.dryRun) {
+      try {
+        await sudoStep(ctx, {
+          description: 'Remove the temporary cezar service backup.',
+          command: `rm -f ${shquote(backup)} ${shquote(activated)}`,
+          verify: async (c) => !(await verifyCommand(c, 'test', ['-e', backup])) && !(await verifyCommand(c, 'test', ['-e', activated])),
+        });
+      } catch {
+        ctx.ui.warn(`The service is running, but temporary rollback files at ${backup} and ${activated} could not be removed.`);
+      }
+    }
+    if (authRequired && !ctx.state.externalProxy) await cutoverNginxToManagedAuth(ctx);
+    return { artifacts: [owned('service', { name: UNIT_NAME, scope: 'system', path: unitPath })] };
   },
   async undo(ctx, created) {
     const UNIT_NAME = unitName(ctx);
@@ -1060,8 +1247,7 @@ const autostartStep: InstallStep = {
 /**
  * `--external-proxy` verification: confirm the cockpit is listening on the
  * interface the operator's proxy will dial, then hand them the routing snippet.
- * cezar ships no auth of its own, so this is also where we say — unmissably —
- * that the front they own has to enforce it.
+ * Without a ready managed-auth store, the external front must enforce auth.
  */
 async function verifyBehindExternalProxy(ctx: InstallContext): Promise<{ artifacts: StepArtifact[] }> {
   const port = ctx.state.primaryPort;
@@ -1089,10 +1275,15 @@ async function verifyBehindExternalProxy(ctx: InstallContext): Promise<{ artifac
   }
 
   ctx.ui.success(`Cockpit is up and listening on ${target}.`);
-  ctx.ui.warn(
-    'cezar has NO built-in authentication in this mode — your reverse proxy MUST enforce it. ' +
-      'Anyone who can reach ' + target + ' can run agents on this box.',
-  );
+  const managedAuth = await managedAuthIsReady(ctx);
+  if (managedAuth) {
+    ctx.ui.success('Managed Cezar login is active. You can route directly to the cockpit without proxy Basic Auth.');
+  } else {
+    ctx.ui.warn(
+      'Managed Cezar login is not ready — your reverse proxy MUST enforce authentication. ' +
+        'Anyone who can reach ' + target + ' can run agents on this box.',
+    );
+  }
   ctx.ui.message(
     [
       `Point your existing proxy at ${target} for ${domain}. For Dokploy / Traefik,`,
@@ -1103,20 +1294,23 @@ async function verifyBehindExternalProxy(ctx: InstallContext): Promise<{ artifac
       `      cezar:`,
       `        rule: "Host(\`${domain}\`)"`,
       `        entryPoints: [websecure]`,
-      `        middlewares: [cezar-auth]`,
+      ...(managedAuth ? [] : [`        middlewares: [cezar-auth]`]),
       `        service: cezar`,
       `        tls: { certResolver: letsencrypt }`,
       `    services:`,
       `      cezar:`,
       `        loadBalancer:`,
       `          servers: [{ url: "${target}" }]`,
-      `    middlewares:`,
-      `      cezar-auth:`,
-      `        basicAuth:`,
-      `          users: ["USER:$$apr1$$...."]   # htpasswd -nb user pass (double every $)`,
+      ...(managedAuth ? [] : [
+        `    middlewares:`,
+        `      cezar-auth:`,
+        `        basicAuth:`,
+        `          users: ["USER:$$apr1$$...."]   # htpasswd -nb user pass (double every $)`,
+      ]),
       ``,
       `Keep ${host}:${port} off the public internet (ufw / cloud firewall) — the proxy`,
-      `should be the only thing that can reach it.`,
+      `should be the only thing that can reach it. With managed logins, overwrite`,
+      `X-Real-IP with the connecting client's address before forwarding requests.`,
     ].join('\n'),
   );
   return { artifacts: [] };
@@ -1150,10 +1344,23 @@ const identityStep: InstallStep = {
     //    auth *before* proxying, so an anonymous 401 alone does NOT prove the
     //    backend is up — check the upstream directly.
     const upstreamUp = await isCezarUp(ctx, port);
+    const managedAuth = await managedAuthIsReady(ctx);
 
-    // 2) An anonymous request through nginx must be challenged (auth is active).
-    const anonCode = await curlCode(ctx, [...tls, ...host, base]);
-    const authEnforced = anonCode === '401';
+    // 2) An anonymous protected API request through nginx must be denied.
+    //    If managed login is active, also prove the public session endpoint is
+    //    reachable; the removed Basic credentials no longer authenticate it.
+    const anonCode = await curlCode(ctx, [...tls, ...host, `${base}api/v1/projects`]);
+    let managedLoginReachable = false;
+    if (managedAuth) {
+      const session = await curlResponse(ctx, [...tls, ...host, `${base}api/v1/auth/session`]);
+      try {
+        const body = JSON.parse(session.body) as { authRequired?: unknown; authenticated?: unknown };
+        managedLoginReachable = session.code === '200' && body.authRequired === true && body.authenticated === false;
+      } catch {
+        // A malformed or inaccessible session response fails managed-mode verification.
+      }
+    }
+    const authEnforced = anonCode === '401' && (!managedAuth || managedLoginReachable);
 
     // 3) The real proof: an AUTHENTICATED request reaches cezar (2xx/3xx — not
     //    401/403 = bad creds, not 502/504 = upstream down). Credentials are read
@@ -1162,7 +1369,7 @@ const identityStep: InstallStep = {
     let authedOk: boolean | null = null;
     let identityOk: boolean | null = null;
     const cred = ctx.prefs.cockpit;
-    if (cred) {
+    if (cred && !managedAuth) {
       // curl's config format requires `\` and `"` escaped inside the quoted
       // value — both are legal password characters; unescaped they break the
       // config parse and fail a WORKING install with "bad credentials".
@@ -1190,9 +1397,14 @@ const identityStep: InstallStep = {
     const url = ctx.state.publicUrl ?? `http://<this-server>`;
     const coreOk = upstreamUp && authEnforced && authedOk !== false && identityOk !== false;
     if (coreOk) {
+      const authSummary = managedAuth
+        ? 'managed Cezar login is active'
+        : authedOk
+          ? 'an authenticated request reached cezar'
+          : 'auth is enforced and cezar is up';
       ctx.ui.success(
-        `Cockpit is live at ${url} — ${authedOk ? 'an authenticated request reached cezar' : 'auth is enforced and cezar is up'}. ` +
-          'Log in with the username and password you set.',
+        `Cockpit is live at ${url} — ${authSummary}. ` +
+          (managedAuth ? 'Sign in using a Cezar managed member account.' : 'Log in with the username and password you set.'),
       );
       if (!https) {
         ctx.ui.warn(
@@ -1208,7 +1420,11 @@ const identityStep: InstallStep = {
 
     const problems: string[] = [];
     if (!upstreamUp) problems.push(`cezar is not listening on 127.0.0.1:${port} — the service is down, so nginx returns 502`);
-    if (!authEnforced) problems.push(`nginx did not challenge an anonymous request (got "${anonCode}") — basic auth may not be active`);
+    if (!authEnforced) {
+      problems.push(managedAuth
+        ? `managed login did not expose its session endpoint and protect the projects API (got "${anonCode}")`
+        : `nginx did not challenge an anonymous request (got "${anonCode}") — basic auth may not be active`);
+    }
     if (authedOk === false) problems.push('an authenticated request did not reach cezar (bad credentials, or the upstream is down)');
     if (identityOk === false) problems.push(`the cockpit answering on 127.0.0.1:${port} is serving another install, not this one`);
     ctx.ui.error(

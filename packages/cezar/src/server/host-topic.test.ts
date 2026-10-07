@@ -32,6 +32,7 @@ function stubHub() {
     },
     attach: () => undefined,
     close: () => undefined,
+    revokeUser: () => undefined,
   };
   return { hub, topics };
 }

@@ -1,7 +1,8 @@
-import { randomBytes } from 'node:crypto';
-import { chmodSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { chmodSync, closeSync, mkdirSync, openSync, renameSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
+import lockfile from 'proper-lockfile';
 import { z } from 'zod';
 // Contract VALUES, like `workspaceUiStateSchema` in workspace/migrations.ts: the tag bounds this
 // file must not `.catch` away are the same constants the PATCH route validates against, so they
@@ -43,9 +44,11 @@ const workspaceProjectSchema = z
   .object({
     /** Unique slug — URL segment, sidebar key, worktree namespace. */
     id: z.string().regex(PROJECT_ID_RE),
+    /** Immutable membership key; unlike the URL slug it is never reused after removal. */
+    entryId: z.string().uuid().optional().catch(undefined),
     /** Absolute, realpath-normalized repo root (normalization is the writer's
      *  job — `registerProject` in step 1.3; the schema only demands absolute). */
-    root: z.string().min(1).max(4096).refine((p) => p.startsWith('/'), 'root must be absolute'),
+    root: z.string().min(1).max(4096).refine(isAbsolute, 'root must be absolute'),
     /** Display name (basename by default). `''` = caller derives a fallback. */
     name: z.string().max(200).catch(''),
     addedAt: z.string().max(64).catch(''),
@@ -379,12 +382,10 @@ export function atomicWriteJsonSync(path: string, value: unknown): void {
 }
 
 /**
- * Read-modify-write merge: re-read the file, apply `mutator`, atomic-rename
- * write (`0600`, dir `0700`). Because every writer re-reads immediately before
- * writing, two processes registering different projects converge instead of
- * dropping each other's entries (last-writer-wins only within the tiny
- * read→rename window — acceptable for a registry that self-heals on next
- * boot). The mutator may mutate its argument in place or return a replacement.
+ * Read-modify-write merge: serialize writers on `config-write.lock`, re-read
+ * the file, apply `mutator`, then atomic-rename the write (`0600`, dir `0700`).
+ * The lock makes concurrent processes preserve each other's registry changes.
+ * The mutator may mutate its argument in place or return a replacement.
  * Returns the config that was written. Throws on write failure (e.g. a
  * read-only home) — degrading is the caller's policy, per house rules.
  *
@@ -401,20 +402,32 @@ export async function mergeWriteWorkspaceConfig(
   mutator: (config: WorkspaceConfig) => WorkspaceConfig | void,
 ): Promise<WorkspaceConfig> {
   const path = workspaceConfigPath();
-  const current = await loadWorkspaceConfig(path);
-  const next = mutator(current) ?? current;
-  atomicWriteJsonSync(path, next);
-  // Refresh the snapshot after EVERY successful write, including an emptied
-  // registry (#731). Skipping the empty case left a stale non-empty backup:
-  // removing the last project, then losing config.json, resurrected the project
-  // the user had deliberately unregistered. An empty snapshot is not restored on
-  // load (see loadWorkspaceConfigBackup), so recovery now settles on the empty
-  // registry the user intended rather than the old projects.
+  const lockPath = join(dirname(path), 'config-write.lock');
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  assertCezarHomeWriteIsSandboxed(lockPath);
+  closeSync(openSync(lockPath, 'a', 0o600));
+  try { chmodSync(lockPath, 0o600); } catch { /* best effort on filesystems without POSIX modes */ }
+  const release = await lockfile.lock(lockPath, {
+    realpath: false,
+    stale: 10_000,
+    update: 2_000,
+    retries: { retries: 8, minTimeout: 30, maxTimeout: 250, randomize: true },
+  });
   try {
-    atomicWriteJsonSync(workspaceConfigBackupPath(path), next);
-  } catch {
-    // Best-effort: the registry itself is already safely on disk, and a
-    // failed snapshot must never turn a successful write into an error.
+    const current = await loadWorkspaceConfig(path);
+    const next = mutator(current) ?? current;
+    // Migrate legacy registry entries under the same lock as every writer, so
+    // membership grants always point at stable IDs and cannot race re-adds.
+    for (const project of next.projects) project.entryId ??= randomUUID();
+    atomicWriteJsonSync(path, next);
+    // Refresh the snapshot after EVERY successful write, including an emptied registry (#731).
+    try {
+      atomicWriteJsonSync(workspaceConfigBackupPath(path), next);
+    } catch {
+      // The registry itself is already safely on disk; snapshot failure is non-fatal.
+    }
+    return next;
+  } finally {
+    await release();
   }
-  return next;
 }

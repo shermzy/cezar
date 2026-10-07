@@ -123,6 +123,11 @@ export function agentAccountsPath(): string {
   return join(cezarHomeDir(), 'agent-accounts.json');
 }
 
+/** User-authored workspace specialist roles, independent from account and project settings. */
+export function specialistsPath(): string {
+  return join(cezarHomeDir(), 'specialists.json');
+}
+
 /**
  * Where a hosted cockpit keeps the folders it allocates for agent accounts (spec
  * 2026-10-04-hosted-agent-accounts H2): one `<provider>/<id>/` per account, created `0700`, never

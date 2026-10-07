@@ -1,0 +1,37 @@
+{
+  "version": 3,
+  "files": [
+    {
+      "source": "files/CLAUDE.md",
+      "path": "CLAUDE.md"
+    },
+    {
+      "source": "files/claude/settings.json",
+      "path": ".claude/settings.json"
+    },
+    {
+      "source": "files/claude/hooks/guard-secrets.mjs",
+      "path": ".claude/hooks/guard-secrets.mjs"
+    },
+    {
+      "source": "files/claude/hooks/format.mjs",
+      "path": ".claude/hooks/format.mjs"
+    },
+    {
+      "source": "files/claude/hooks/guard-merge.mjs",
+      "path": ".claude/hooks/guard-merge.mjs"
+    },
+    {
+      "source": "files/REVIEW.md",
+      "path": "REVIEW.md"
+    },
+    {
+      "source": "files/intent/README.md",
+      "path": "intent/README.md"
+    },
+    {
+      "source": "files/intent/TEMPLATE.md",
+      "path": "intent/TEMPLATE.md"
+    }
+  ]
+}

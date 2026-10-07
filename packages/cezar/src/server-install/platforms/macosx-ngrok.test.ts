@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cezarLaunchdPlist, launchdPlist, macosxNgrok, macosxNgrokIdentityStep } from './macosx-ngrok.ts';
+import { cezarLaunchdPlist, launchdPlist, macosxNgrok, macosxNgrokIdentityStep, ngrokAuthTrafficPolicy } from './macosx-ngrok.ts';
 import { availablePlatformIds, getStrategy } from '../strategies.ts';
 import { runInstall, runUninstall } from '../engine.ts';
 import { loadServerState } from '../state.ts';
@@ -35,7 +35,43 @@ describe('macosx-ngrok', () => {
     expect(p).toContain('<string>4321</string>');
     expect(p).toContain('<string>ops:hunter2</string>');
     expect(p).toContain('<string>cezar.ngrok.app</string>');
+    expect(p).not.toContain('<string>--traffic-policy-file</string>');
+    expect(ngrokAuthTrafficPolicy()).toMatch(/remove-headers[\s\S]*add-headers[\s\S]*conn\.client_ip/);
     expect(p).toContain('<key>KeepAlive</key>');
+  });
+
+  it('installs the client-IP policy only after managed auth or proxy trust is opted in', async () => {
+    const previousAuth = process.env.CEZ_AUTH_REQUIRED;
+    const previousTrust = process.env.CEZ_AUTH_TRUST_PROXY;
+    const previousHome = process.env.HOME;
+    delete process.env.CEZ_AUTH_REQUIRED;
+    delete process.env.CEZ_AUTH_TRUST_PROXY;
+    process.env.HOME = home;
+    const runner: Runner = {
+      capture: async (_program, args) => {
+        if (args[0] === 'print' || args.join(' ').includes('command -v')) return { code: 0, stdout: '/usr/local/bin/ngrok', stderr: '' };
+        return { code: 0, stdout: '', stderr: '' };
+      },
+      interactive: async () => 0,
+    };
+    try {
+      await macosxNgrok.steps({} as never).find((step) => step.id === 'ngrok')!.run({
+        state: { schema: 1, installed: false, primaryPort: 4321, steps: {} },
+        ui: { ...createAutoUi(), password: async (option: { message: string }) => option.message.includes('authtoken') ? 'SECRET-TOKEN' : 'longenough', text: async (option: { message: string }) => option.message.includes('domain') ? '' : 'ops' },
+        runner, save: async () => {}, dryRun: false, assumeYes: true, reconfigure: new Set<string>(), repoRoot: '/repo', now: '', prefs: {},
+      } as never);
+      const plist = readFileSync(join(home, 'Library', 'LaunchAgents', 'ai.cezar.ngrok.plist'), 'utf8');
+      expect(plist).toContain('<string>--basic-auth</string>');
+      expect(plist).not.toContain('<string>--traffic-policy-file</string>');
+      expect(existsSync(join(home, 'Library', 'Application Support', 'Cezar', 'ngrok-auth-traffic-policy.yml'))).toBe(false);
+    } finally {
+      if (previousAuth === undefined) delete process.env.CEZ_AUTH_REQUIRED;
+      else process.env.CEZ_AUTH_REQUIRED = previousAuth;
+      if (previousTrust === undefined) delete process.env.CEZ_AUTH_TRUST_PROXY;
+      else process.env.CEZ_AUTH_TRUST_PROXY = previousTrust;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
   });
 
   it('cezar launchd plist has one PATH key and carries instance identity', () => {
@@ -43,6 +79,11 @@ describe('macosx-ngrok', () => {
     expect(plist.match(/<key>PATH<\/key>/g)).toHaveLength(1);
     expect(plist).toContain('<key>CEZ_INSTANCE_ID</key>');
     expect(plist).toContain('<string>install-a</string>');
+  });
+
+  it('persists a caller-supplied workspace home in the service launcher', () => {
+    const plist = cezarLaunchdPlist('/repo', 4321, ['/usr/bin/node', '/repo/dist/index.js'], 'install-a', true, true, '/Users/me/Cezar Workspaces');
+    expect(plist).toContain('<key>CEZ_HOME</key>\n      <string>/Users/me/Cezar Workspaces</string>');
   });
 
   it('cezarLaunchdPlist embeds the argv, port, workdir and env', () => {
@@ -201,6 +242,35 @@ describe('macosx-ngrok review fixes (PR #423)', () => {
     }
   });
 
+  it('keeps ngrok Basic Auth when only the anonymous managed gate is responding', async () => {
+    const previousAuth = process.env.CEZ_AUTH_REQUIRED;
+    const previousHome = process.env.HOME;
+    process.env.CEZ_AUTH_REQUIRED = '1';
+    process.env.HOME = home;
+    const runner: Runner = {
+      capture: async (program, args) => {
+        if (program === 'curl' && args.some((arg) => arg.includes('/auth/session'))) {
+          return { code: 0, stdout: '{"authRequired":true,"authenticated":false}\n200', stderr: '' };
+        }
+        if (program === 'curl' && args.some((arg) => arg.includes('/projects'))) return { code: 0, stdout: '401', stderr: '' };
+        if (args[0] === 'print' || args.join(' ').includes('command -v')) return { code: 0, stdout: '/usr/local/bin/ngrok', stderr: '' };
+        return { code: 0, stdout: '', stderr: '' };
+      },
+      interactive: async () => 0,
+    };
+    try {
+      // The service can advertise its gate before the owner store is bootstrapped.
+      await ngrokStepOf().run(ctxFor(runner));
+      const plist = readFileSync(join(home, 'Library', 'LaunchAgents', 'ai.cezar.ngrok.plist'), 'utf8');
+      expect(plist).toContain('<string>--basic-auth</string>');
+    } finally {
+      if (previousAuth === undefined) delete process.env.CEZ_AUTH_REQUIRED;
+      else process.env.CEZ_AUTH_REQUIRED = previousAuth;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
+
   it('a failed launchctl bootstrap fails the step instead of recording done', async () => {
     const runner: Runner = {
       capture: async (_p, args) => {
@@ -217,6 +287,87 @@ describe('macosx-ngrok review fixes (PR #423)', () => {
     } finally {
       if (oldHome === undefined) delete process.env.HOME;
       else process.env.HOME = oldHome;
+    }
+  });
+
+  it('restores the previous Basic Auth tunnel when managed login is not ready and reload fails', async () => {
+    const previousAuth = process.env.CEZ_AUTH_REQUIRED;
+    const previousHome = process.env.HOME;
+    process.env.CEZ_AUTH_REQUIRED = '1';
+    process.env.HOME = home;
+    const path = join(home, 'Library', 'LaunchAgents', 'ai.cezar.ngrok.plist');
+    mkdirSync(join(home, 'Library', 'LaunchAgents'), { recursive: true });
+    const previous = launchdPlist(4321, 'old:oldpassword', 'old.ngrok.app');
+    writeFileSync(path, previous, { mode: 0o600 });
+    let bootstraps = 0;
+    const runner: Runner = {
+      capture: async (program, args) => {
+        if (program === 'curl' && args.some((arg) => arg.includes('/auth/session'))) {
+          return { code: 0, stdout: '{"authRequired":true,"authenticated":false}\n200', stderr: '' };
+        }
+        if (program === 'curl' && args.some((arg) => arg.includes('/projects'))) return { code: 0, stdout: '401', stderr: '' };
+        if (args[0] === 'print' || args.join(' ').includes('command -v')) return { code: 0, stdout: '/usr/local/bin/ngrok', stderr: '' };
+        return { code: 0, stdout: '', stderr: '' };
+      },
+      interactive: async (_program, args) => {
+        if (args[0] === 'bootstrap') return ++bootstraps === 1 ? 5 : 0;
+        return 0;
+      },
+    };
+    try {
+      await expect(ngrokStepOf().run(ctxFor(runner))).rejects.toThrow(/restored/);
+      expect(readFileSync(path, 'utf8')).toBe(previous);
+      expect(bootstraps).toBe(2);
+      expect(existsSync(join(home, 'Library', 'Application Support', 'Cezar', 'ngrok-auth-traffic-policy.yml'))).toBe(false);
+    } finally {
+      if (previousAuth === undefined) delete process.env.CEZ_AUTH_REQUIRED;
+      else process.env.CEZ_AUTH_REQUIRED = previousAuth;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
+
+  it('refuses to rewrite a service launcher for a different CEZ_HOME', async () => {
+    const previousHome = process.env.HOME;
+    process.env.HOME = home;
+    const path = join(home, 'Library', 'LaunchAgents', 'ai.cezar.cockpit.plist');
+    mkdirSync(join(home, 'Library', 'LaunchAgents'), { recursive: true });
+    const previous = cezarLaunchdPlist('/repo', 4321, ['/usr/bin/node', '/repo/dist/index.js'], 'install-a', false, false, '/other/workspace');
+    writeFileSync(path, previous, { mode: 0o600 });
+    const runner: Runner = {
+      capture: async () => ({ code: 0, stdout: '/usr/local/bin/cezar', stderr: '' }),
+      interactive: async () => 0,
+    };
+    try {
+      const step = macosxNgrok.steps({} as never).find((candidate) => candidate.id === 'autostart')!;
+      await expect(step.run(ctxFor(runner))).rejects.toThrow(/same CEZ_HOME/);
+      expect(readFileSync(path, 'utf8')).toBe(previous);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+  });
+
+  it('restores the previous Cezar service launcher when bootstrap fails', async () => {
+    const previousHome = process.env.HOME;
+    process.env.HOME = home;
+    const path = join(home, 'Library', 'LaunchAgents', 'ai.cezar.cockpit.plist');
+    mkdirSync(join(home, 'Library', 'LaunchAgents'), { recursive: true });
+    const previous = cezarLaunchdPlist('/repo', 4321, ['/usr/bin/node', '/repo/dist/index.js'], 'install-a', false, false, home);
+    writeFileSync(path, previous, { mode: 0o600 });
+    let bootstraps = 0;
+    const runner: Runner = {
+      capture: async () => ({ code: 0, stdout: '/usr/local/bin/cezar', stderr: '' }),
+      interactive: async (_program, args) => args[0] === 'bootstrap' && ++bootstraps === 1 ? 5 : 0,
+    };
+    try {
+      const step = macosxNgrok.steps({} as never).find((candidate) => candidate.id === 'autostart')!;
+      await expect(step.run(ctxFor(runner))).rejects.toThrow(/restored/);
+      expect(readFileSync(path, 'utf8')).toBe(previous);
+      expect(bootstraps).toBe(2);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
     }
   });
 

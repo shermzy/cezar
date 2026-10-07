@@ -693,7 +693,7 @@ describe('agent profiles API', () => {
       });
       const spawns: string[] = [];
       const app = makeApp({
-        socketHub: { registerTopic: () => () => undefined, attach: () => undefined, close: () => undefined },
+        socketHub: { registerTopic: () => () => undefined, attach: () => undefined, close: () => undefined, revokeUser: () => undefined },
         providerAuth: new ProviderAuthService({
           runCommand: async (executable) => {
             spawns.push(executable);
@@ -730,7 +730,7 @@ describe('agent profiles API', () => {
       process.env.CEZ_REMOTE = '1';
       const probes: Array<Record<string, string> | undefined> = [];
       const app = makeApp({
-        socketHub: { registerTopic: () => () => undefined, attach: () => undefined, close: () => undefined },
+        socketHub: { registerTopic: () => () => undefined, attach: () => undefined, close: () => undefined, revokeUser: () => undefined },
         providerAuth: new ProviderAuthService({
           runCommand: async (_executable, _args, _timeout, env) => {
             probes.push(env);

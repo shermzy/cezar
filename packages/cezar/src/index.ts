@@ -23,6 +23,7 @@ import { resolveTrackerAgentEnv } from './server/tracker/agent-credentials.ts';
 import { loadWorkflows } from './workflows/load.ts';
 import { resolveCapabilities } from './server/capabilities.ts';
 import { startServer, WorkspaceEventBus } from './server/server.ts';
+import { acquireManagedWorkspaceGuards } from './server/workspace-guards.ts';
 import {
   ProviderRuntimeAuthObserver,
   recoverWithProviderRuntimeAuthObservation,
@@ -42,6 +43,8 @@ import { runProjectsCommand } from './workspace/projects-cli.ts';
 import { WorkspaceSemaphore } from './workspace/semaphore.ts';
 import { runTaskCommand } from './dispatch/task-cli.ts';
 import { runAutomationCommand } from './automations/automation-cli.ts';
+import { runAuthCommand } from './workspace/auth-cli.ts';
+import { runSdlcCommand } from './sdlc/cli.ts';
 
 import { runTrackerConnectionsCommand } from './server/tracker/connections-cli.ts';
 
@@ -52,10 +55,12 @@ Usage:
   cezar run "<task>"        run a task headless in the terminal
   cezar task <create|report|list>  dispatch or report from inside a running task (CEZ_DISPATCH=0 turns it off)
   cezar automation <add|create|check|run|list|…>  create and manage automations (GitHub polls, schedules) on a running cockpit
+  cezar sdlc baseline <plan|apply>  write the AI-native SDLC baseline files into a repo (never edits an existing file)
   cezar init                scaffold .ai/cezar/ (example workflow + skill)
   cezar projects            list the projects this cockpit serves
                             (also: projects add [<dir>] · projects remove <id>)
   cezar tracker-connections <list|remove ID>  inspect or delete local project credentials
+  cezar auth <bootstrap|repair|reset-password [username]>  manage managed-access recovery locally
   cezar server-install      interactive wizard to host cezar on a server
   cezar server-deploy       redeploy a new version (reload the service) + verify
   cezar server-uninstall    reverse a server-install
@@ -87,7 +92,7 @@ Options:
       --bind-host <host>      host the cockpit binds (default 127.0.0.1). Use with
                               --external-proxy when the proxy runs in a container and
                               cannot reach loopback (e.g. docker bridge 172.17.0.1).
-                              cezar has NO built-in auth — never expose this publicly.
+                              requires managed auth or an authenticating proxy before exposure.
       --yes                   server-install: accept safe defaults (never auto-sudo)
       --reconfigure <ids>     server-install: force re-run of step id(s), comma-separated
       --reinstall             server-install: force re-run of every step (full reinstall)
@@ -99,6 +104,10 @@ Skills live in .ai/skills/, .ai/cezar/skills/ and your team skills repo
 workflows in .ai/cezar/workflows/.`;
 
 async function main(): Promise<void> {
+  if (process.argv[2] === 'auth') {
+    process.exitCode = await runAuthCommand(process.argv.slice(3));
+    return;
+  }
   if (process.argv[2] === 'tracker-connections') {
     process.exitCode = await runTrackerConnectionsCommand(process.argv.slice(3));
     return;
@@ -112,6 +121,11 @@ async function main(): Promise<void> {
   // `cez automation …` (spec 2026-09-13-automations-from-prompt): same shape, same reason.
   if (process.argv[2] === 'automation') {
     process.exitCode = await runAutomationCommand(process.argv.slice(3));
+    return;
+  }
+  // `cez sdlc …` (spec 2026-10-06-ai-native-sdlc-fleet): what the `sdlc-baseline` workflow runs.
+  if (process.argv[2] === 'sdlc') {
+    process.exitCode = await runSdlcCommand(process.argv.slice(3));
     return;
   }
   const { values, positionals } = parseArgs({
@@ -230,6 +244,11 @@ async function serveCommand(
   openBrowser: boolean,
   bindHost?: string,
 ): Promise<void> {
+  const releaseGuards = process.env.CEZ_AUTH_REQUIRED === '1'
+    ? await acquireManagedWorkspaceGuards()
+    : undefined;
+  let guardsOwnedByServer = false;
+  try {
   const bootProjectId = await initWorkspace(repoRoot);
   // ONE workspace semaphore for the whole process (spec 2026-07-20, step 2.5):
   // the boot manager and every lazily-built project context count their runs
@@ -304,15 +323,15 @@ async function serveCommand(
     console.log(`\n  ⬆ cezar ${latest} is available (running ${version}) — ${how}\n`);
   });
   // SECURITY: cezar executes agents. A non-loopback bind exposes that box to
-  // whatever can reach the interface, and cezar itself has NO auth — it is only
-  // for a deliberate hosted setup where a reverse proxy in front provides TLS +
-  // auth (see `server-install --external-proxy`). Say so, loudly, every start.
+  // whatever can reach the interface, so managed auth or an authenticating TLS
+  // reverse proxy must sit in front of it.
   if (bindHost && !['127.0.0.1', 'localhost', '::1'].includes(bindHost)) {
-    console.log(
-      `\n  ⚠ binding ${bindHost}:${port} — cezar has no built-in auth.\n` +
-        `    Only do this behind a reverse proxy that enforces authentication,\n` +
-        `    and make sure this interface is not reachable from the internet.\n`,
-    );
+    const authMessage = process.env.CEZ_AUTH_REQUIRED === '1'
+      ? `  managed Cezar authentication is required on ${bindHost}:${port}; keep TLS at the reverse proxy.\n`
+      : `  ⚠ binding ${bindHost}:${port} — managed Cezar auth is off.\n` +
+        `    Put an authenticating TLS reverse proxy in front of this interface,\n` +
+        `    or enable CEZ_AUTH_REQUIRED=1 in the durable service launcher.\n`;
+    console.log(`\n${authMessage}`);
   }
   // Where a dispatched agent's `cez task` CLI reaches this cockpit (spec 2026-09-10-dispatch).
   // Set before the first run can start, read by every manager's `agentEnv` while dispatch is on.
@@ -332,6 +351,10 @@ async function serveCommand(
     workspaceEvents,
     selfUpdate,
   }, port);
+  if (releaseGuards) {
+    guardsOwnedByServer = true;
+    httpServer.once('close', () => { void releaseGuards(); });
+  }
   const url = `http://localhost:${port}`;
 
   console.log(`\n  cezar v${version} — ${repoRoot}`);
@@ -408,6 +431,9 @@ async function serveCommand(
   if (openBrowser) {
     const healthy = await waitForHealth(`${url}/api/v1/health`, 5_000);
     if (healthy) openUrl(url);
+  }
+  } finally {
+    if (releaseGuards && !guardsOwnedByServer) await releaseGuards();
   }
 }
 

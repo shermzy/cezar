@@ -242,6 +242,20 @@ const BACKEND_ALLOW_PREFIXES: Record<AgentBackend, readonly string[]> = {
   copilot: ['COPILOT_'],
 };
 
+/**
+ * Single non-secret vars a backend needs that no prefix family should grant. Keyed by the backend
+ * being built, so an entry can never reach another backend's child (pi shares OpenCode's provider
+ * prefixes but not this).
+ */
+const BACKEND_ALLOW_NAMES: Partial<Record<AgentBackend, ReadonlySet<string>>> = {
+  // Cloudflare Workers AI (spec 2026-10-04-cloudflare-workers-ai): the endpoint interpolates the
+  // account id, OpenCode reads it from the env before its own store, and its login skips storing
+  // it when the login shell already had it. The KEY is deliberately absent: CLOUDFLARE_API_KEY is
+  // also the name of Cloudflare's account-wide Global API Key, so it reaches the agent only from
+  // OpenCode's own store or an explicit CEZ_ENV_PASSTHROUGH.
+  opencode: upperSet(['CLOUDFLARE_ACCOUNT_ID']),
+};
+
 /** `gh` handoff (draft PRs) works in every backend — the one credential the
  *  project deliberately keeps in the environment (AGENTS.md "No secrets in
  *  state files": GITHUB_TOKEN stays in env, never on disk). */
@@ -341,6 +355,7 @@ export function buildChildEnv(opts: BuildChildEnvOptions): NodeJS.ProcessEnv {
   }
 
   const backendPrefixes = BACKEND_ALLOW_PREFIXES[opts.backend] ?? BACKEND_ALLOW_PREFIXES.claude;
+  const backendNames = BACKEND_ALLOW_NAMES[opts.backend];
   const passthrough = upperSet(
     (readVar(source, 'CEZ_ENV_PASSTHROUGH') ?? '')
       .split(',')
@@ -382,6 +397,7 @@ export function buildChildEnv(opts: BuildChildEnvOptions): NodeJS.ProcessEnv {
     // reaches the on-disk NDJSON (see secret-redaction.ts).
     if (GH_ALLOW_NAMES.has(key)) return true;
     if (matchesPrefix(key, backendPrefixes)) return true;
+    if (backendNames?.has(key)) return true;
     if (cloudNames.has(key) || matchesPrefix(key, cloudPrefixes)) return true;
     // Explicit opt-in passthrough.
     if (passthrough.has(key)) return true;

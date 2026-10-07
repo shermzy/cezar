@@ -192,6 +192,7 @@ describe('ProjectGroups', () => {
     expect(within(shopNav).getAllByRole('link').map((a) => a.getAttribute('href'))).toEqual([
       '/p/shop/',
       '/p/shop/board',
+      '/p/shop/agents',
       '/p/shop/git',
       '/p/shop/github',
       '/p/shop/skills',

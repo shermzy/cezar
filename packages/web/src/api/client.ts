@@ -118,6 +118,12 @@ import type {
   SkillsUpdateState,
   SelfUpdateDevelopment,
   SelfUpdateStatus,
+  SpecialistCreate,
+  SpecialistDefinition,
+  SpecialistMutationResponse,
+  SpecialistResponse,
+  SpecialistUpdate,
+  SpecialistsResponse,
   UpdateChannel,
   TrackerAssociation,
   TrackerAssociationInput,
@@ -128,6 +134,8 @@ import type {
   TrackerItemResponse,
   TrackerItemsResponse,
   TrackerKind, TrackerCredentials, TrackerConnectionResponse,
+  DeliveryGetResponse,
+  DeliveryRefreshResponse,
 } from '@open-mercato/cezar-api-client'
 import { parseProviderStatusResponse } from '@/lib/provider-status'
 import {
@@ -144,6 +152,7 @@ import type { Ok, OkJson } from '@open-mercato/cezar-api-client'
 import type { ClientResponse } from 'hono/client'
 import type { ResponseFormat } from 'hono/types'
 import type { AppType } from '@open-mercato/cezar/app-type'
+import { getAuthCsrfToken } from './csrf'
 
 /**
  * The cockpit's client for its own HTTP API.
@@ -383,7 +392,12 @@ async function unwrapValidated<R extends ClientResponse<unknown, number, Respons
  */
 async function fetchOrThrow(url: string, init?: RequestInit): Promise<Response> {
   try {
-    return await fetch(url, { ...init, credentials: 'include' })
+    const headers = new Headers(init?.headers)
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes((init?.method ?? 'GET').toUpperCase())) {
+      const token = getAuthCsrfToken()
+      if (token) headers.set('X-Cezar-CSRF', token)
+    }
+    return await fetch(url, { ...init, headers, credentials: 'include' })
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
     throw new ApiError(0, `cannot reach the cezar server (${url})`, { cause })
@@ -554,6 +568,18 @@ export async function getProjectRun(projectId: string, id: string, opts?: ReadOp
       init(opts),
     ),
     runPath(id),
+  )
+}
+
+/** Stored delivery evidence for one run. The read is deliberately separate from the run record:
+ * opening a task never authorizes a GitHub refresh, and an untracked run answers `null`. */
+export async function getRunDelivery(id: string, opts?: ReadOptions, projectId = queryScope()): Promise<DeliveryGetResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id'].delivery.$get(
+      { param: { projectId, id: encodeURIComponent(id) } },
+      init(opts),
+    ),
+    runPath(id, '/delivery'),
   )
 }
 
@@ -1535,6 +1561,18 @@ export async function createRunPr(id: string): Promise<CreatePrResponse> {
   )
 }
 
+/** Explicitly start or refresh read-only delivery observation. No interval or hidden refresh is
+ * attached here; the panel owns the user's click and the response becomes the cached evidence. */
+export async function refreshRunDelivery(id: string, projectId = queryScope()): Promise<DeliveryRefreshResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id'].delivery.refresh.$post({
+      param: { projectId, id: encodeURIComponent(id) },
+      json: {},
+    }),
+    runPath(id, '/delivery/refresh'),
+  )
+}
+
 /** Rename a run (#389): the edit becomes the display title and wins over any auto-summary. */
 export async function patchRun(id: string, patch: PatchRunInput): Promise<RunRecord> {
   return unwrap(
@@ -2287,6 +2325,34 @@ export async function removeAgentProfile(id: string): Promise<RemoveAgentProfile
       param: { id: encodeURIComponent(id) },
     }),
     `/workspace/agent-profiles/${encodeURIComponent(id)}`,
+  )
+}
+
+export async function getWorkspaceSpecialists(opts?: ReadOptions): Promise<SpecialistsResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.specialists.$get({}, init(opts)),
+    '/workspace/specialists',
+  )
+}
+
+export async function createWorkspaceSpecialist(input: SpecialistCreate): Promise<SpecialistResponse> {
+  return unwrap(await cez.api.v1.workspace.specialists.$post({ json: input }), '/workspace/specialists')
+}
+
+export async function updateWorkspaceSpecialist(
+  id: string,
+  input: SpecialistUpdate,
+): Promise<SpecialistResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.specialists[':id'].$patch({ param: { id: encodeURIComponent(id) }, json: input }),
+    `/workspace/specialists/${encodeURIComponent(id)}`,
+  )
+}
+
+export async function deleteWorkspaceSpecialist(id: string): Promise<SpecialistMutationResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.specialists[':id'].$delete({ param: { id: encodeURIComponent(id) } }),
+    `/workspace/specialists/${encodeURIComponent(id)}`,
   )
 }
 

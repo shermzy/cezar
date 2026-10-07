@@ -28,7 +28,8 @@ import type { ProviderId } from './provider-auth.ts';
  * - **claude** → `CLAUDE_CONFIG_DIR`. Documented; moves credentials, settings, projects, sessions.
  * - **codex** → `CODEX_HOME`. Documented; `auth.json` lives inside it, so identity moves too.
  * - **opencode** → nothing usable. `OPENCODE_CONFIG_DIR`/`OPENCODE_CONFIG` move CONFIG ONLY;
- *   credentials live in `~/.local/share/opencode/opencode.db`, behind a separate `OPENCODE_DB`.
+ *   credentials live in its DATA dir — `~/.local/share/opencode/auth.json` on 1.18.1, as
+ *   `opencode auth list` prints — which neither variable moves.
  *   A config-dir-only profile would swap settings while still billing the other account — the UI
  *   would say "Work" and the run would not be — so OpenCode is unsupported until it documents a
  *   single home variable. `XDG_CONFIG_HOME` is rejected regardless: it is machine-wide and would
