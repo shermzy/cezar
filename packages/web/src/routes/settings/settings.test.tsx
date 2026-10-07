@@ -130,6 +130,7 @@ const GLOBAL_SECTIONS = [
   // Agent accounts (spec 2026-07-29-agent-profiles) sit beside Projects: both describe the
   // machine and the person at it, not any one repo.
   'accounts',
+  'members',
   'projects',
 ]
 

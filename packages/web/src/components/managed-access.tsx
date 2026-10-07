@@ -4,7 +4,7 @@ import { acceptWorkspaceInvite, getAuthSession, getViewerSummary, signIn, signOu
 
 function AccessCard({ children }: { children: ReactNode }) {
   return (
-    <main className="flex min-h-screen items-center justify-center bg-background px-4 py-12 text-foreground">
+    <main className="flex min-h-dvh items-center justify-center bg-background px-4 py-12 text-foreground">
       <section className="w-full max-w-md rounded-2xl border border-border bg-card p-7 shadow-xl shadow-black/5">
         <div className="mb-7">
           <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">Cezar workspace</p>
@@ -93,7 +93,7 @@ function InviteForm({ token, onDone }: { token: string; onDone(): Promise<void> 
 function ViewerHome({ onLogout }: { onLogout(): Promise<void> }) {
   const summary = useQuery({ queryKey: ['viewer-summary'], queryFn: getViewerSummary })
   return (
-    <main className="min-h-screen bg-background px-5 py-10 text-foreground">
+    <main className="min-h-dvh bg-background px-5 py-10 text-foreground">
       <div className="mx-auto max-w-4xl">
         <header className="mb-8 flex items-start justify-between gap-4">
           <div><p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">Cezar workspace</p><h1 className="mt-2 text-3xl font-semibold tracking-tight">Project overview</h1><p className="mt-2 text-sm text-muted-foreground">Read-only access to projects shared with you.</p></div>

@@ -1233,13 +1233,15 @@ export class RunManager {
     const trackerEnv = association && this.resolveTrackerEnv && process.env.CEZ_DRY_RUN !== '1'
       ? await this.resolveTrackerEnv(this.repoRoot, association)
       : {};
-    const secrets = [trackerEnv.JIRA_API_TOKEN, trackerEnv.LINEAR_API_KEY].filter((value): value is string => Boolean(value));
+    const env = { ...this.agentEnv(runId, options.generateFollowups), ...trackerEnv, ...resolved.env };
+    const secrets = [trackerEnv.JIRA_API_TOKEN, trackerEnv.LINEAR_API_KEY, env.CEZ_INTERNAL_CAPABILITY]
+      .filter((value): value is string => Boolean(value));
     if (trackerEnv.JIRA_EMAIL && trackerEnv.JIRA_API_TOKEN) {
       secrets.push(Buffer.from(`${trackerEnv.JIRA_EMAIL}:${trackerEnv.JIRA_API_TOKEN}`).toString('base64'));
     }
     this.store.registerRunSecrets(runId, secrets);
     return {
-      env: { ...this.agentEnv(runId, options.generateFollowups), ...trackerEnv, ...resolved.env },
+      env,
       profileId: resolved.profile.id,
     };
   }
