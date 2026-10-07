@@ -118,6 +118,12 @@ import type {
   SkillsUpdateState,
   SelfUpdateDevelopment,
   SelfUpdateStatus,
+  SpecialistCreate,
+  SpecialistDefinition,
+  SpecialistMutationResponse,
+  SpecialistResponse,
+  SpecialistUpdate,
+  SpecialistsResponse,
   UpdateChannel,
   TrackerAssociation,
   TrackerAssociationInput,
@@ -2233,6 +2239,34 @@ export async function removeAgentProfile(id: string): Promise<RemoveAgentProfile
       param: { id: encodeURIComponent(id) },
     }),
     `/workspace/agent-profiles/${encodeURIComponent(id)}`,
+  )
+}
+
+export async function getWorkspaceSpecialists(opts?: ReadOptions): Promise<SpecialistsResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.specialists.$get({}, init(opts)),
+    '/workspace/specialists',
+  )
+}
+
+export async function createWorkspaceSpecialist(input: SpecialistCreate): Promise<SpecialistResponse> {
+  return unwrap(await cez.api.v1.workspace.specialists.$post({ json: input }), '/workspace/specialists')
+}
+
+export async function updateWorkspaceSpecialist(
+  id: string,
+  input: SpecialistUpdate,
+): Promise<SpecialistResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.specialists[':id'].$patch({ param: { id: encodeURIComponent(id) }, json: input }),
+    `/workspace/specialists/${encodeURIComponent(id)}`,
+  )
+}
+
+export async function deleteWorkspaceSpecialist(id: string): Promise<SpecialistMutationResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.specialists[':id'].$delete({ param: { id: encodeURIComponent(id) } }),
+    `/workspace/specialists/${encodeURIComponent(id)}`,
   )
 }
 
