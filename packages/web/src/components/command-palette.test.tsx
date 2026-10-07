@@ -287,7 +287,7 @@ describe('Views group', () => {
     openWith({ metaKey: true })
     await screen.findByRole('dialog')
     await waitFor(() =>
-      expect(document.querySelectorAll('[data-slot="palette-view"]')).toHaveLength(10),
+      expect(document.querySelectorAll('[data-slot="palette-view"]')).toHaveLength(11),
     )
 
     const newTaskRows = [...document.querySelectorAll('[data-nav-to="/new"]')]
