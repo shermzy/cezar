@@ -10,6 +10,7 @@ export const authMemberSchema = z.object({
   updatedAt: z.string(),
 });
 export type AuthMember = z.infer<typeof authMemberSchema>;
+export type AuthRole = AuthMember['role'];
 
 export const authSessionResponseSchema = z.object({
   authRequired: z.boolean(),

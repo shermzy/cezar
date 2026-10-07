@@ -129,7 +129,7 @@ export function MembersSection() {
   )
 }
 
-function MemberRow({ member, projects, onSave, onRemove }: {
+function MemberRow({ member, projects, onSave, onRevokeSessions, onRemove }: {
   member: { id: string; username: string; role: AuthRole; status: 'active' | 'suspended'; projectEntryIds: string[] }
   projects: { entryId: string; name: string }[]
   onSave(id: string, input: AuthUpdateMemberInput): Promise<void>
