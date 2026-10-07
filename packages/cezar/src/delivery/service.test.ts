@@ -256,6 +256,40 @@ describe('DeliveryService', () => {
     expect(invalidated?.checks).toEqual(prior.checks);
   });
 
+  it('recovers with new evidence after the linked repository changes', async () => {
+    const { root, store, run } = await makeStore();
+    await store.recordPrRef(run.id, {
+      number: 31,
+      url: 'https://github.com/acme/repo/pull/31',
+      origin: 'created',
+    });
+    let observation: ForgeDeliveryObservation = {
+      available: true,
+      prs: [mergedPr(31)],
+      checks: [check('success')],
+    };
+    const service = new DeliveryService(async () => fakeForge(observation));
+    const prior = await service.refresh(root, store, run.id);
+    expect(prior.status).toBe('ci-passed');
+
+    observation = {
+      available: true,
+      prs: [{ ...mergedPr(31), url: 'https://github.com/other/new-repo/pull/31' }],
+      checks: [check('success')],
+    };
+    const stale = await service.refresh(root, store, run.id);
+    expect(stale.status).toBe('unknown');
+    expect(stale.stale).toBe(true);
+    expect(stale.repository).toMatchObject({ owner: 'acme', name: 'repo' });
+    expect(stale.prs).toEqual(prior.prs);
+
+    const recovered = await service.refresh(root, store, run.id);
+    expect(recovered.status).toBe('ci-passed');
+    expect(recovered.repository).toMatchObject({ owner: 'other', name: 'new-repo' });
+    expect(recovered.prs[0]?.url).toBe('https://github.com/other/new-repo/pull/31');
+    expect(recovered.stale).toBeUndefined();
+  });
+
   it('does not write an observation after the association changes in flight', async () => {
     const { root, store, run } = await makeStore();
     await store.recordPrRef(run.id, {

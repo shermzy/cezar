@@ -102,7 +102,7 @@ export class DeliveryService {
         unknownRecord(previous, checkedAt, 'The forge returned evidence for an unknown or different repository.', previous?.repository ?? repository, previous !== undefined),
       );
     }
-    if (previous?.repository && repository && repositoryKey(previous.repository) !== repositoryKey(repository)) {
+    if (previous?.repository && !previous.stale && repository && repositoryKey(previous.repository) !== repositoryKey(repository)) {
       return this.writeIfCurrent(
         store,
         runId,
