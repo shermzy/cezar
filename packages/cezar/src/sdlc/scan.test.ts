@@ -168,7 +168,7 @@ describe('scanProject: plays', () => {
     expect(paused.results.find((r) => r.play === 'agent-review')?.note).toMatch(/enable|paused/i);
     expect((await scores(repo(withAuto(auto(true, 'quick-task')))))['agent-review']).toBe('partial');
     // The automation alone, without REVIEW.md, is half the play.
-    expect((await scores(repo({ '.ai/cezar/automations.json': auto(true, 'pr-review') })))['agent-review']).toBe('partial');
+    expect((await scores(repo({ '.ai/cezar/automations.json': auto(true, 'builtin:pr-review') })))['agent-review']).toBe('partial');
   });
 
   it('agent-review: a corrupt or hostile automations.json never throws and falls back to the workflow check', async () => {

@@ -35,9 +35,9 @@ export interface SdlcSelection {
 /** A score is a glyph AND a word (aria-label + shape), never colour alone. */
 function ScoreMark({ score }: { score: SdlcScore }) {
   if (score === 'present')
-    return <CheckCircle2Icon className="size-4 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+    return <CheckCircle2Icon className="size-4 text-success" aria-hidden="true" />
   if (score === 'partial')
-    return <CircleDotIcon className="size-4 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+    return <CircleDotIcon className="size-4 text-pending-strong" aria-hidden="true" />
   return <CircleDashedIcon className="size-4 text-soft-foreground" aria-hidden="true" />
 }
 
