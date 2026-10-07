@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { z } from 'zod';
 import { REFERENCE_STATUS_MAX } from '@open-mercato/cezar-contract';
+import type { DeliveryCheck, DeliveryPr } from '@open-mercato/cezar-contract';
 import { autosaveCommit } from '../../git-worktree.ts';
 import type {
   DraftPrInput,
@@ -21,6 +22,8 @@ import type {
   ForgePrDiffResult,
   ForgeRefKind,
   ForgeRecentCreatedData,
+  ForgeDeliveryObservation,
+  ForgeDeliveryRef,
   ForgeSearchData,
   ForgeTimelineEvent,
   ForgeTimelineEventKind,
@@ -250,6 +253,34 @@ const mergePrSchema = z.object({
 const mergeChecksSchema = z.object({
   statusCheckRollup: z.array(mergeCheckSchema).nullish(),
 });
+
+const ghDeliveryPrSchema = z.object({
+  number: z.number().int().positive(),
+  url: z.string().url(),
+  state: z.string(),
+  mergeable: z.string().nullish(),
+  baseRefName: z.string(),
+  mergeCommit: z.union([z.object({ oid: z.string() }), z.string()]).nullish(),
+}).passthrough();
+
+const ghDeliveryRunSchema = z.object({
+  id: z.number().int().positive(),
+  workflow_id: z.number().int().positive(),
+  name: z.string(),
+  run_attempt: z.number().int().positive(),
+  head_sha: z.string(),
+  head_branch: z.string().nullish(),
+  event: z.string(),
+  status: z.string(),
+  conclusion: z.string().nullish(),
+  html_url: z.string().url(),
+  created_at: z.string(),
+}).passthrough();
+
+const ghDeliveryRunsSchema = z.object({
+  total_count: z.number().int().nonnegative(),
+  workflow_runs: z.array(ghDeliveryRunSchema),
+}).passthrough();
 const repoMergePolicySchema = z.object({
   allow_merge_commit: z.boolean().default(false),
   allow_squash_merge: z.boolean().default(false),
@@ -2991,6 +3022,129 @@ export function mergePreflightAllowed(current: ForgePrMergeState, overrideRules 
   return current.canMerge || (overrideRules && current.canOverride);
 }
 
+const DELIVERY_ACTIONS_PAGE_CAP = 100;
+
+/** Read the linked PRs and exact target-branch push Actions evidence used by delivery tracking. */
+export async function fetchGithubDelivery(
+  repoRoot: string,
+  repoRef: GithubRepoRef | null,
+  refs: readonly ForgeDeliveryRef[],
+): Promise<ForgeDeliveryObservation> {
+  if (process.env.CEZ_DRY_RUN === '1') {
+    return { available: false, reason: 'Delivery evidence is unavailable in dry-run mode.' };
+  }
+  if (!repoRef) return { available: false, reason: 'GitHub repository could not be resolved.' };
+  const host = repoRef.host ?? 'github.com';
+  if (!/^[a-z0-9.-]+$/i.test(host) || !/^[a-z0-9_.-]+$/.test(repoRef.owner) || !/^[a-z0-9_.-]+$/.test(repoRef.repo)) {
+    return { available: false, reason: 'GitHub repository identity is invalid.' };
+  }
+  const repository = {
+    host,
+    owner: repoRef.owner,
+    name: repoRef.repo,
+    url: `https://${host}/${repoRef.owner}/${repoRef.repo}`,
+  };
+  try {
+    const observedPrs: DeliveryPr[] = [];
+    const checks: DeliveryCheck[] = [];
+    let truncated = false;
+    for (const ref of refs.slice(0, 8)) {
+      if (ref.url && !isDeliveryRefUrl(ref.url, repository, ref.number)) {
+        return { available: false, reason: `Linked pull request #${ref.number} belongs to a different repository.`, repository };
+      }
+      const pr = ghDeliveryPrSchema.parse(JSON.parse(await gh(repoRoot, [
+        'pr', 'view', String(ref.number), '--repo', `${host}/${repoRef.owner}/${repoRef.repo}`, '--json', 'number,url,state,mergeable,baseRefName,mergeCommit',
+      ])));
+      if (!isDeliveryRefUrl(pr.url, repository, ref.number)) {
+        return { available: false, reason: `GitHub returned pull request #${ref.number} from a different repository.`, repository };
+      }
+      const state = pr.state.toUpperCase() === 'MERGED' ? 'merged' : pr.state.toUpperCase() === 'CLOSED' ? 'closed' : 'open';
+      const mergeable = pr.mergeable?.toUpperCase() === 'CONFLICTING'
+        ? 'conflicting'
+        : pr.mergeable?.toUpperCase() === 'MERGEABLE'
+          ? 'mergeable'
+          : 'unknown';
+      const mergeCommitSha = typeof pr.mergeCommit === 'string' ? pr.mergeCommit : pr.mergeCommit?.oid;
+      const deliveryPr = {
+        number: pr.number,
+        url: pr.url,
+        state,
+        mergeable,
+        baseRef: pr.baseRefName,
+        ...(mergeCommitSha && /^[0-9a-f]{40}$/i.test(mergeCommitSha) ? { mergeCommitSha } : {}),
+      } as DeliveryPr;
+      observedPrs.push(deliveryPr);
+      const mergedSha = deliveryPr.mergeCommitSha;
+      if (state !== 'merged' || !mergedSha) continue;
+      const actionOut = await gh(repoRoot, [
+        'api', '--hostname', host,
+        `repos/${repoRef.owner}/${repoRef.repo}/actions/runs?event=push&branch=${encodeURIComponent(pr.baseRefName)}&head_sha=${mergedSha}&per_page=${DELIVERY_ACTIONS_PAGE_CAP}&page=1`,
+      ]);
+      const actionPage = ghDeliveryRunsSchema.parse(JSON.parse(actionOut));
+      if (actionPage.total_count > DELIVERY_ACTIONS_PAGE_CAP || actionPage.workflow_runs.length >= DELIVERY_ACTIONS_PAGE_CAP) truncated = true;
+      const latestByWorkflow = new Map<number, z.infer<typeof ghDeliveryRunSchema>>();
+      for (const run of actionPage.workflow_runs) {
+        const branch = run.head_branch;
+        if (run.event !== 'push' || branch === undefined || branch !== pr.baseRefName || run.head_sha.toLowerCase() !== mergedSha.toLowerCase()) continue;
+        const prior = latestByWorkflow.get(run.workflow_id);
+        if (!prior || deliveryRunIsNewer(run, prior)) latestByWorkflow.set(run.workflow_id, run);
+      }
+      for (const run of latestByWorkflow.values()) {
+        const normalized = deliveryRunStatus(run.status, run.conclusion ?? null);
+        checks.push({
+          workflow: run.name,
+          runId: run.id,
+          runAttempt: run.run_attempt,
+          sha: run.head_sha,
+          branch: pr.baseRefName,
+          event: run.event,
+          status: normalized.status,
+          conclusion: normalized.conclusion,
+          url: run.html_url,
+        });
+      }
+    }
+    return { available: true, repository, prs: observedPrs, checks, ...(truncated ? { truncated: true } : {}) };
+  } catch (error) {
+    return { available: false, reason: firstLine(error instanceof Error ? error.message : String(error)), repository };
+  }
+}
+
+function deliveryRunIsNewer(
+  candidate: z.infer<typeof ghDeliveryRunSchema>,
+  prior: z.infer<typeof ghDeliveryRunSchema>,
+): boolean {
+  const candidateCreated = Date.parse(candidate.created_at);
+  const priorCreated = Date.parse(prior.created_at);
+  if (candidateCreated !== priorCreated) return candidateCreated > priorCreated;
+  if (candidate.id !== prior.id) return candidate.id > prior.id;
+  return candidate.run_attempt > prior.run_attempt;
+}
+
+function isDeliveryRefUrl(value: string, repository: { host: string; owner: string; name: string }, number: number): boolean {
+  try {
+    const parsed = new URL(value);
+    const parts = parsed.pathname.split('/').filter(Boolean);
+    return parsed.host.toLowerCase() === repository.host.toLowerCase()
+      && parts[0]?.toLowerCase() === repository.owner.toLowerCase()
+      && parts[1]?.toLowerCase() === repository.name.toLowerCase()
+      && parts[2] === 'pull'
+      && Number(parts[3]) === number;
+  } catch {
+    return false;
+  }
+}
+
+function deliveryRunStatus(status: string, conclusion: string | null): {
+  status: 'queued' | 'in_progress' | 'completed';
+  conclusion: string | null;
+} {
+  if (status === 'queued' || status === 'waiting' || status === 'requested') return { status: 'queued', conclusion: null };
+  if (status === 'in_progress') return { status: 'in_progress', conclusion: null };
+  if (status === 'completed') return { status, conclusion };
+  return { status: 'completed', conclusion: null };
+}
+
 /** owner/repo parsed out of the origin remote — feeds `viewUrl`. */
 export interface GithubRepoRef {
   host?: string;
@@ -3044,6 +3198,8 @@ export function createGithubDriver(repoRoot: string, repoRef: GithubRepoRef | nu
     },
 
     prMergeState: (number, opts) => fetchPrMergeState(repoRoot, repoRef, number, opts?.refresh),
+
+    observeDelivery: (refs) => fetchGithubDelivery(repoRoot, repoRef, refs),
 
     mergePR: (number, input) => mergePullRequest(repoRoot, repoRef, number, input),
 

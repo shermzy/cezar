@@ -47,6 +47,10 @@ export const DATA_GITIGNORE_ENTRIES = [
   'automation-poll.lock.guard/',
   'automation-mutation.lock.guard/',
   'automation-mutation.lock',
+  'config-write.lock', // CEZ_HOME may be this .ai/cezar directory; serialize workspace registry writes privately
+  'auth.json', // managed login hashes, sessions, invitations and project grants
+  'auth.json.corrupt-*.bak', // explicit local repair preserves the damaged auth store
+  'auth.lock', // managed-auth store mutation lock
 ] as const;
 
 export function ensureDataGitignore(repoRoot: string): void {

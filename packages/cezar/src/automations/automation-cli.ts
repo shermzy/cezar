@@ -16,11 +16,13 @@
 import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { trackerAutomationOptionsSchema, SCHEDULE_TYPES, parseCron, scheduleLabel, type AutomationSchedule } from '@open-mercato/cezar-contract';
+import { RUNNER_IDS } from '../core/agent-runner.ts';
 import { AUTOMATION_SCHEMA_REFERENCE } from './prompts.ts';
 
 export interface AutomationCliEnv {
   CEZ_API_URL?: string;
   CEZ_PROJECT_ID?: string;
+  CEZ_INTERNAL_CAPABILITY?: string;
 }
 
 export interface AutomationCliIo {
@@ -42,7 +44,7 @@ const USAGE = `cez automation — create and manage automations (GitHub/Jira/Lin
                                                 create one from a JSON definition (stdin when neither flag is given);
                                                 paused unless --enable
   cez automation add --name <name> (--cron "<M H * * *>" | --on <event>[,<event>] --every <5m|1h>)
-                     [--prompt <text> | --prompt-file <path>] [--workflow <w>] [--runner claude|codex|opencode]
+                     [--prompt <text> | --prompt-file <path>] [--workflow <w>] [--runner ${RUNNER_IDS.join('|')}]
                      [--model <m>] [--autonomous | --no-autonomous] [--dispatch [--max-subtasks N] [--review-child]]
                      [--label <l>]... [--author <a>]... [--enable]
                                                 the same, from flags: --cron takes "M H * * *" (daily), "M H * * 1-5"
@@ -69,12 +71,12 @@ const CHECK_TIMEOUT_MS = 120_000;
 /** The keys `PUT /automations/:id` accepts besides `enabled` and `expectedRevision`. */
 const EDITABLE_KEYS = ['name', 'description', 'kind', 'events', 'intervalSeconds', 'filters', 'schedule', 'trackerTrigger', 'task'] as const;
 
-function base(env: AutomationCliEnv): { url: string; scope: string; projectId?: string } | null {
+function base(env: AutomationCliEnv): { url: string; scope: string; projectId?: string; headers: Record<string, string> } | null {
   const url = env.CEZ_API_URL?.replace(/\/+$/, '');
   if (!url) return null;
   const projectId = env.CEZ_PROJECT_ID || undefined;
   const scope = projectId ? `${url}/api/v1/p/${encodeURIComponent(projectId)}` : `${url}/api/v1`;
-  return { url, scope, projectId };
+  return { url, scope, projectId, headers: env.CEZ_INTERNAL_CAPABILITY ? { authorization: `Bearer ${env.CEZ_INTERNAL_CAPABILITY}` } : {} };
 }
 
 /** Where the cockpit shows this automation — the link every mutating command prints. */
@@ -225,7 +227,7 @@ export async function runAutomationCommand(
     return 2;
   }
   const json = async (url: string, init?: RequestInit): Promise<Response> =>
-    io.fetch(url, { ...init, headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) } });
+    io.fetch(url, { ...init, headers: { ...api.headers, 'content-type': 'application/json', ...(init?.headers ?? {}) } });
   const sleep = io.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   /** `create` and `add` share one POST and one report; the flags only differ in how the body is built. */
   const createFrom = async (body: Record<string, unknown>): Promise<number> => {
@@ -353,7 +355,7 @@ export async function runAutomationCommand(
         // unguessable id the project route handed back), so it is polled off the plain API root.
         const deadline = Date.now() + CHECK_TIMEOUT_MS;
         for (;;) {
-          const response = await io.fetch(`${api.url}/api/v1/automation-checks/${encodeURIComponent(checkId)}`);
+          const response = await io.fetch(`${api.url}/api/v1/automation-checks/${encodeURIComponent(checkId)}`, { headers: api.headers });
           if (!response.ok) throw new Error(`could not read check ${checkId} — ${await readError(response)}`);
           const check = (await response.json()) as { status: string; matches?: number; truncated?: boolean; error?: string };
           if (check.status === 'complete') {
@@ -372,7 +374,7 @@ export async function runAutomationCommand(
         }
       }
       case 'list': {
-        const response = await io.fetch(`${api.scope}/automations`);
+        const response = await io.fetch(`${api.scope}/automations`, { headers: api.headers });
         if (!response.ok) throw new Error(`could not list automations — ${await readError(response)}`);
         const data = (await response.json()) as {
           available: boolean;
@@ -405,7 +407,7 @@ export async function runAutomationCommand(
       case 'show': {
         const id = rest[0];
         if (!id) throw new Error('an automation id is required: cez automation show <id>');
-        const response = await io.fetch(`${api.scope}/automations/${encodeURIComponent(id)}`);
+        const response = await io.fetch(`${api.scope}/automations/${encodeURIComponent(id)}`, { headers: api.headers });
         if (!response.ok) throw new Error(`could not read automation ${id} — ${await readError(response)}`);
         io.log(JSON.stringify(await response.json(), null, 2));
         return 0;
@@ -428,7 +430,7 @@ export async function runAutomationCommand(
       case 'delete': {
         const id = rest[0];
         if (!id) throw new Error('an automation id is required: cez automation delete <id>');
-        const response = await io.fetch(`${api.scope}/automations/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        const response = await io.fetch(`${api.scope}/automations/${encodeURIComponent(id)}`, { method: 'DELETE', headers: api.headers });
         if (!response.ok) throw new Error(`delete refused — ${await readError(response)}`);
         io.log(`deleted automation ${id}`);
         return 0;

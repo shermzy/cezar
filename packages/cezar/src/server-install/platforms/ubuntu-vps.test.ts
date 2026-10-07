@@ -17,6 +17,7 @@ import {
 import { StepAborted } from '../steps.ts';
 import { createAutoUi } from '../ui.ts';
 import type { InstallContext, InstallStep, Runner, Ui } from '../types.ts';
+import { bootstrapOwner } from '../../workspace/auth.ts';
 
 const okRunner: Runner = { capture: async () => ({ code: 0, stdout: '', stderr: '' }), interactive: async () => 0 };
 
@@ -74,6 +75,29 @@ describe('ubuntu-vps ssl step', () => {
     expect(ids).toEqual(['deps', 'autostart', 'identity']);
     expect(ids).not.toContain('nginx-proxy');
     expect(ids).not.toContain('ssl');
+  });
+
+  it('keeps external proxy authentication when only the anonymous managed gate is responding', async () => {
+    const messages: string[] = [];
+    const runner: Runner = {
+      capture: async (program, args) => {
+        if (program !== 'curl') return { code: 0, stdout: '', stderr: '' };
+        const url = args.find((arg) => arg.startsWith('http://') || arg.startsWith('https://')) ?? '';
+        if (url.endsWith('/api/v1/auth/session')) return { code: 0, stdout: '{"authRequired":true,"authenticated":false}\n200', stderr: '' };
+        if (url.endsWith('/api/v1/projects')) return { code: 0, stdout: '401', stderr: '' };
+        return { code: 0, stdout: '200', stderr: '' };
+      },
+      interactive: async () => 0,
+    };
+    const ctx = ctxWith({
+      runner,
+      state: { externalProxy: true },
+      ui: { ...createAutoUi(), message: (message: string) => messages.push(message) },
+    });
+    // No auth.json exists in this describe's sandbox, despite the backend's
+    // anonymous endpoints returning the two expected managed-mode responses.
+    await stepById('identity').run(ctx);
+    expect(messages.join('\n')).toContain('middlewares: [cezar-auth]');
   });
 
   it('external-proxy verify passes when cezar answers on the bound host', async () => {
@@ -404,6 +428,17 @@ describe('ubuntu-vps nginx-proxy identity (interactive, dry-run)', () => {
 });
 
 describe('systemdUnit', () => {
+  it('persists a caller-supplied workspace home in the service environment', () => {
+    const unit = systemdUnit('/srv/app', 4321, 'user', '/usr/local/bin/cezar', undefined, undefined, true, true, '/srv/cezar workspaces/team');
+    expect(unit).toContain('Environment="CEZ_HOME=/srv/cezar workspaces/team"');
+  });
+
+  it('trusts the managed proxy client-IP header when auth is enabled', () => {
+    const unit = systemdUnit('/srv/app', 4321, 'user', '/usr/local/bin/cezar', undefined, undefined, true);
+    expect(unit).toContain('Environment=CEZ_AUTH_REQUIRED=1');
+    expect(unit).toContain('Environment=CEZ_AUTH_TRUST_PROXY=1');
+  });
+
   it('runs cezar serve loopback with CEZ_REMOTE=1 and the port', () => {
     const unit = systemdUnit('/srv/app', 4321, 'user', '/usr/local/bin/cezar');
     expect(unit).toContain('Environment=CEZ_REMOTE=1');
@@ -441,49 +476,100 @@ describe('systemdUnit', () => {
 });
 
 describe('ubuntu-vps identity verification (#1008)', () => {
-  function identityCtx(healthOutput: string) {
-    const messages: string[] = [];
-    let curl = 0;
-    const runner: Runner = {
-      capture: async (program) => {
-        if (program !== 'curl') return { code: 0, stdout: '', stderr: '' };
-        curl++;
-        if (curl === 1) return { code: 0, stdout: '200', stderr: '' };
-        if (curl === 2) return { code: 0, stdout: '401', stderr: '' };
-        if (curl === 3) return { code: 0, stdout: '200', stderr: '' };
-        return { code: 0, stdout: healthOutput, stderr: '' };
-      },
-      interactive: async () => 0,
-    };
-    const ctx = ctxWith({ runner, ui: { ...createAutoUi(), success: (m: string) => messages.push(m), warn: (m: string) => messages.push(m) }, state: { instanceId: 'this-install' } });
-    ctx.prefs = { cockpit: { user: 'ops', password: 'password' } };
-    return { ctx, messages };
-  }
+  it('verifies the managed login after removing nginx Basic Auth', async () => {
+    const previousHome = process.env.CEZ_HOME;
+    const authHome = mkdtempSync(join(tmpdir(), 'cez-managed-identity-'));
+    process.env.CEZ_HOME = authHome;
+    try {
+      await bootstrapOwner('owner', 'correct-horse-battery-staple');
+      const inputs: string[] = [];
+      const runner: Runner = {
+        capture: async (program, args, opts) => {
+          if (opts?.input) inputs.push(opts.input);
+          if (program !== 'curl') return { code: 0, stdout: '', stderr: '' };
+          const url = args.find((arg) => arg.startsWith('http://') || arg.startsWith('https://')) ?? '';
+          if (url === 'http://127.0.0.1:4321/') return { code: 0, stdout: '200', stderr: '' };
+          if (url.endsWith('/api/v1/auth/session')) {
+            return { code: 0, stdout: '{"authRequired":true,"authenticated":false}\n200', stderr: '' };
+          }
+          if (url.endsWith('/api/v1/projects')) return { code: 0, stdout: '401', stderr: '' };
+          return { code: 0, stdout: '000', stderr: '' };
+        },
+        interactive: async () => 0,
+      };
+      const messages: string[] = [];
+      const ctx = ctxWith({
+        runner,
+        ui: { ...createAutoUi(), success: (message: string) => messages.push(message), warn: (message: string) => messages.push(message) },
+        state: { instanceId: 'this-install', domain: 'cezar.example.com', publicUrl: 'https://cezar.example.com' },
+      });
+      ctx.prefs = { cockpit: { user: 'ops', password: 'old-basic-password' } };
 
-  it('rejects a different cezar instance answering on the expected port', async () => {
+      await expect(stepById('identity').run(ctx)).resolves.toBeTruthy();
+
+      expect(inputs).toEqual([]);
+      expect(messages.join('\n')).toContain('managed Cezar login is active');
+    } finally {
+      if (previousHome === undefined) delete process.env.CEZ_HOME;
+      else process.env.CEZ_HOME = previousHome;
+      rmSync(authHome, { recursive: true, force: true });
+    }
+  });
+
+  function identityCtx(healthOutput: string) {
+    const previousHome = process.env.CEZ_HOME;
+    const authHome = mkdtempSync(join(tmpdir(), 'cez-unmanaged-identity-'));
+    process.env.CEZ_HOME = authHome;
+    const messages: string[] = [];
     const errors: string[] = [];
-    const ui = { ...createAutoUi(), error: (message: string) => errors.push(message) } as Ui;
-    let curl = 0;
     const runner: Runner = {
       capture: async (program, args) => {
         if (program !== 'curl') return { code: 0, stdout: '', stderr: '' };
-        curl++;
-        if (curl === 1) return { code: 0, stdout: '200', stderr: '' }; // upstream
-        if (curl === 2) return { code: 0, stdout: '401', stderr: '' }; // anonymous proxy
-        if (curl === 3) return { code: 0, stdout: '200', stderr: '' }; // authenticated reach
-        return { code: 0, stdout: '{"instanceId":"other-install"}\n200', stderr: '' };
+        const url = args.find((arg) => arg.startsWith('http://') || arg.startsWith('https://')) ?? '';
+        if (url.endsWith('/api/v1/auth/session') || url.endsWith('/api/v1/projects')) {
+          return { code: 0, stdout: '401', stderr: '' };
+        }
+        if (url.endsWith('/api/v1/health')) return { code: 0, stdout: healthOutput, stderr: '' };
+        return { code: 0, stdout: '200', stderr: '' };
       },
       interactive: async () => 0,
     };
-    const ctx = ctxWith({ ui, runner, state: { instanceId: 'this-install' } });
+    const ctx = ctxWith({ runner, ui: {
+      ...createAutoUi(),
+      success: (m: string) => messages.push(m),
+      warn: (m: string) => messages.push(m),
+      error: (m: string) => errors.push(m),
+    }, state: { instanceId: 'this-install' } });
     ctx.prefs = { cockpit: { user: 'ops', password: 'password' } };
-    await expect(stepById('identity').run(ctx)).rejects.toBeInstanceOf(StepAborted);
-    expect(errors.join('\n')).toContain('serving another install, not this one');
+    return {
+      ctx,
+      messages,
+      errors,
+      cleanup: () => {
+        if (previousHome === undefined) delete process.env.CEZ_HOME;
+        else process.env.CEZ_HOME = previousHome;
+        rmSync(authHome, { recursive: true, force: true });
+      },
+    };
+  }
+
+  it('rejects a different cezar instance answering on the expected port', async () => {
+    const { ctx, errors, cleanup } = identityCtx('{"instanceId":"other-install"}\n200');
+    try {
+      await expect(stepById('identity').run(ctx)).rejects.toBeInstanceOf(StepAborted);
+      expect(errors.join('\n')).toContain('serving another install, not this one');
+    } finally {
+      cleanup();
+    }
   });
 
   it('accepts a matching identity', async () => {
-    const { ctx } = identityCtx('{"instanceId":"this-install"}\n200');
-    await expect(stepById('identity').run(ctx)).resolves.toBeTruthy();
+    const { ctx, cleanup } = identityCtx('{"instanceId":"this-install"}\n200');
+    try {
+      await expect(stepById('identity').run(ctx)).resolves.toBeTruthy();
+    } finally {
+      cleanup();
+    }
   });
 
   it.each([
@@ -491,9 +577,13 @@ describe('ubuntu-vps identity verification (#1008)', () => {
     ['a malformed health payload', 'not-json\n200'],
     ['a forbidden health response', '{"error":"forbidden"}\n403'],
   ])('reports %s as an inconclusive identity check', async (_label, healthOutput) => {
-    const { ctx, messages } = identityCtx(healthOutput);
-    await expect(stepById('identity').run(ctx)).resolves.toBeTruthy();
-    expect(messages.join('\n')).toContain('identity check could not run');
+    const { ctx, messages, cleanup } = identityCtx(healthOutput);
+    try {
+      await expect(stepById('identity').run(ctx)).resolves.toBeTruthy();
+      expect(messages.join('\n')).toContain('identity check could not run');
+    } finally {
+      cleanup();
+    }
   });
 });
 
@@ -720,6 +810,63 @@ describe('ubuntu-vps redeploy restart verification (#912)', () => {
 });
 
 describe('ubuntu-vps autostart step (dry-run)', () => {
+  it('runs a system-scope rollback command when replacement activation fails', async () => {
+    const previous = systemdUnit('/old/repo', 4321, 'system', '/usr/local/bin/cezar');
+    const commands: string[] = [];
+    const runner: Runner = {
+      capture: async (program, args) => {
+        if (program === 'bash') return { code: 0, stdout: '/usr/local/bin/cezar', stderr: '' };
+        if (program === 'systemctl' && args.includes('show-environment')) return { code: 1, stdout: '', stderr: '' };
+        if (program === 'sudo') return { code: 0, stdout: '', stderr: '' };
+        if (program === 'cat') return { code: 0, stdout: commands.length === 1 ? 'replacement unit' : '', stderr: '' };
+        if (program === 'curl') return { code: 0, stdout: '200', stderr: '' };
+        return { code: 0, stdout: '', stderr: '' };
+      },
+      interactive: async (program, args) => {
+        if (program === 'sudo') {
+          commands.push(args.join(' '));
+          return commands.length === 1 ? 5 : 0;
+        }
+        return 0;
+      },
+    };
+    const ctx = ctxWith({ runner });
+    ctx.instance = 'rollback-test';
+    await expect(stepById('autostart').run(ctx)).rejects.toThrow(/restored/);
+    expect(commands).toHaveLength(2);
+    expect(commands[1]).toContain('cezar-reconfigure-rollback');
+  });
+
+  it('restores the previous user unit when its replacement cannot restart', async () => {
+    if (process.platform === 'win32') return; // os.homedir() does not follow HOME on Windows.
+    const previousHome = process.env.HOME;
+    const home = mkdtempSync(join(tmpdir(), 'cez-systemd-rollback-'));
+    process.env.HOME = home;
+    const path = join(home, '.config', 'systemd', 'user', 'cezar.service');
+    mkdirSync(join(home, '.config', 'systemd', 'user'), { recursive: true });
+    const previous = systemdUnit('/old/repo', 4321, 'user', '/usr/local/bin/cezar');
+    writeFileSync(path, previous);
+    let restarts = 0;
+    const runner: Runner = {
+      capture: async (program, args) => {
+        if (program === 'bash') return { code: 0, stdout: '/usr/local/bin/cezar', stderr: '' };
+        if (program === 'systemctl' && args.includes('show-environment')) return { code: 0, stdout: '', stderr: '' };
+        if (program === 'loginctl') return { code: 0, stdout: 'Linger=yes', stderr: '' };
+        return { code: 0, stdout: '', stderr: '' };
+      },
+      interactive: async (program, args) => program === 'systemctl' && args.includes('restart') && ++restarts === 1 ? 5 : 0,
+    };
+    try {
+      await expect(stepById('autostart').run(ctxWith({ runner }))).rejects.toThrow(/restored/);
+      expect(readFileSync(path, 'utf8')).toBe(previous);
+      expect(restarts).toBe(2);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it('records a user-scoped service artifact and writes nothing to disk', async () => {
     const created = await stepById('autostart').run(ctxWith({ dryRun: true }));
     const svc = created?.artifacts.find((a) => a.type === 'service');

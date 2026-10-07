@@ -63,6 +63,12 @@ Five moves that make the cockpit worth the browser tab:
 - 🛡️ **Review gate.** A finished run with changes waits in `review`. Read the diff,
   type notes that go straight back into the agent's session, or push a
   `gh pr create --draft`. You stay the merge button.
+- **Delivery tracking.** In a task with an associated PR, choose **Track delivery**
+  to save its merge state and integration CI evidence separately from the coding
+  run's status. **Refresh delivery** checks GitHub again. Observed integration CI
+  passes only when successful push workflows match the merged commit and target branch;
+  missing or unreadable evidence stays unknown. Tracking survives a restart,
+  makes no merge or deployment, and does not claim the change has been released.
 - 📱 **Runs on your coding server, drives from your pocket.** The cockpit is a
   responsive web app streaming over SSE, so the box running cezar can be a
   **VPS, cloud, or dedicated server** you never sit in front of. Point a browser
@@ -77,7 +83,7 @@ One browser window, with live task updates over Server-Sent Events:
 
 | View | What's in it |
 |---|---|
-| **Dashboard** | **Overview** shows attention, completed/failed outcomes, median cycle time, project comparisons, live work, enabled automations with next run/check times, and recent results; **Usage & cost** shows reported usage and trends. Counters open matching tasks. Drag widgets to reorder them, customize optional tiles and export the current view to PDF/CSV; saved layout is shared by browsers using this workspace. |
+| **Dashboard** | **Overview** shows attention, completed/failed outcomes, median cycle time, project comparisons, live work, enabled automations with next run/check times, and recent results; **Usage & cost** shows reported usage and trends; **SDLC** scores every project against the AI-native SDLC playbook (see below). Counters open matching tasks. Drag widgets to reorder them, customize optional tiles and export the current view to PDF/CSV; saved layout is shared by browsers using this workspace. |
 | **Tasks** | Every task with its status, live event stream (agent text · tool calls · tool results · pasted/generated screenshots and file attachments), tokens and cost. Continue, cancel, open in terminal (`claude --resume`), review the diff, or push a draft PR. |
 | **All tasks** | Every *registered project's* tasks in one table, filtered and grouped by tag, project, status or workflow — see [Grouping connected repositories](#grouping-connected-repositories-tags-and-the-all-tasks-page). Appears once a second project is registered. |
 | **Inbox** | **Opt-in** (`CEZ_FOLLOWUPS=1`; hidden by default). Follow-ups an agent left behind (`todos.json`) — one click turns a suggestion into the next task, pre-wired to its suggested skill. Off, agents are never asked to leave follow-ups; each task's own **Notes** handoff journal is unaffected. |
@@ -229,6 +235,23 @@ segment.
 
 ---
 
+### The AI-native SDLC across your projects
+
+The Dashboard's **SDLC** tab audits every registered project against the plays of Anthropic's AI-native SDLC playbook: `intent.md`, a spec, a plan, a short `CLAUDE.md`, skills, build-time hooks, subagents, a self-verifying feedback loop, config evals, agent PR review, approval-gate hooks, CI agent jobs, a monitoring loop and scheduled scans. Each cell is **Present**, **Partial** or **Absent** with the files that justify it; click a cell to see them. The scan is deterministic: it reads a fixed set of files (64 KB each; symlinks that leave the repo are not followed), uses no agent, no network and no tokens, and writes nothing. A project whose folder is gone shows as unavailable instead of failing the audit.
+
+**Adopt baseline** starts one ordinary task per selected project that writes a small, versioned baseline into the task's own worktree (`CLAUDE.md`, `.claude/settings.json` with a secret/lockfile guard and a format-on-edit hook, `REVIEW.md`, and an `intent/` template) and then stops at the usual review gate. You read the diff and push a draft PR yourself; nothing is merged for you. A file that already exists is never edited, and `.claude/cezar-baseline.json` records what cezar wrote so a later baseline version updates only files nobody touched. The repository owns its copy afterwards.
+
+```bash
+cezar sdlc baseline plan  --into ~/code/api   # what it would do, writes nothing
+cezar sdlc baseline apply --into ~/code/api   # create the missing files
+```
+
+**Agent PR review runs in cezar, not in your repos.** The built-in `pr-review` workflow reviews a pull request it did not write: it reads the PR with `gh pr view`/`diff`/`checks`, follows the repo's `REVIEW.md` when there is one, sorts findings into Important and Nit (at most five), and posts **one** `gh pr comment`. It has no file-writing tool and no `gh pr review`, so it cannot approve, request changes, merge or edit; on the Claude backend that is enforced by its tool allowlist, on other backends it is an instruction. To turn it on, open Automations, choose the **Review new pull requests** template, and enable it; each PR it picks up becomes an ordinary task in its own worktree. Reviewing with a different backend or model than the author is recommended.
+
+Baseline v2 adds a `PreToolUse` hook, `.claude/hooks/guard-merge.mjs`, that blocks an agent's Bash from `gh pr merge`, `gh pr review --approve` and the equivalent `gh api` calls: an agent does not merge or approve a pull request, a human does. It tells a call from a mention, so a commit message or comment that quotes the command is not blocked. This binds Claude Code sessions in repos that adopted the baseline; it does not stop an agent on another backend, and GitHub branch protection (required reviews, no self-approval) remains the backstop. A repo on baseline v1 shows **Baseline outdated**; adopting again adds the guard and updates only files you have not edited.
+
+Put your own baseline in `~/.cezar/sdlc-baseline/` (a `manifest.json` plus the files it lists) to replace the built-in one; an invalid directory is ignored with one warning. Adoption is a local-checkout action and is unavailable on a hosted cockpit. Spec: `.ai/specs/2026-10-06-ai-native-sdlc-fleet.md`.
+
 ## Workflow format
 
 A workflow is a small YAML file in `.ai/cezar/workflows/`:
@@ -250,11 +273,23 @@ steps:
     onFail:
       retry: implement           # loop back to an earlier step…
       max: 2                     # …at most twice
+      # retryOn: [1]             # optional: only these exit codes loop back
 ```
 
 `{{task}}` is replaced with the task text you typed. When a check fails and loops
 back, its failing output is appended to the retried agent's prompt so the next
 attempt can see what broke.
+
+`onFail.retryOn` narrows the loop to the exit codes that mean *the work is
+wrong*. Omitted, any non-zero code loops back — right for `npm test`, which
+exits 1 whether a test failed or the runner could not start. A richer check
+distinguishes the two: an `e2e` browser run exits 1 on a failed test, but 2 on a
+config or credential error and 3 on an engine failure, none of which the agent
+can fix and each of which would otherwise cost a full agent attempt per retry.
+`retryOn: [1]` loops on the verdict and fails the run on the infrastructure,
+naming the code. See [browser and mobile e2e as a verification
+step](e2e-verification.md) for the worked chains, including an independent QA
+exploration as the gate.
 
 Prefer skills over steps? A workflow can also be written in the portable
 shorthand — an ordered list of skill names, each becoming one agent step:
@@ -287,7 +322,9 @@ Useful environment variables:
 |---|---|
 | `CEZ_DRY_RUN=1` | Use the bundled mock instead of the real `claude` CLI — the entire cockpit works offline, for demos and development. |
 | `CEZ_INSTANCE_ID` | Internal server-install identity set automatically in generated systemd/launchd services; normally leave unset. It is surfaced additively by `/api/v1/health` for install verification. |
-| `CEZ_HOSTED_ACCOUNTS=1` | Manage agent accounts from a **hosted** cockpit (`CEZ_REMOTE=1`): add one (cezar allocates a fresh `~/.cezar/accounts/<agent>/<id>/` folder — paths are never typed or shown), rename, remove (its folder stays on disk), assign, re-check, and show who it is signed in as. Off by default: a hosted cockpit then lists its accounts read-only, without folders. Only behind an authenticating proxy — cezar has no built-in auth. No effect on a local cockpit. |
+| `CEZ_HOSTED_ACCOUNTS=1` | Manage agent accounts from a **hosted** cockpit (`CEZ_REMOTE=1`): add one (cezar allocates a fresh `~/.cezar/accounts/<agent>/<id>/` folder — paths are never typed or shown), rename, remove (its folder stays on disk), assign, re-check, and show who it is signed in as. Off by default: a hosted cockpit lists its accounts read-only, without folders. Enable only with managed Cezar logins or an authenticating proxy. No effect on a local cockpit. |
+| `CEZ_AUTH_REQUIRED=1` | Require managed Cezar logins for every cockpit/API request. Off by default. Persist it in the service launcher and restart before bootstrapping the owner; `server-install` preserves it on reconfigure. Owners manage accounts, project grants, and session revocation in Settings → Members. |
+| `CEZ_AUTH_TRUST_PROXY=1` | Use a validated `X-Real-IP` as the login rate-limit source. Bundled nginx/ngrok installers configure and overwrite this header. For a custom proxy, enable it only when the proxy replaces the header with the actual client IP and the Cezar listener is not reachable around that proxy. |
 | `CEZ_AGENT_MODELS_LOCKED=1` | Globally lock each runner to the model configured in its native Claude/Codex/OpenCode settings while keeping runner selection available. Exact `1` also delegates authentication and provider enablement to those native agents, so Cezar skips its credential probes and provider-disable preferences. Existing Cezar presets are preserved but ignored, and an environment change requires a restart. The config-file equivalent is `"modelsLocked": true` in global `~/.cezar/config.json` or one repository's `.ai/cezar/config.json`; config-file locks do not disable provider checks. |
 | `CEZ_APPROVAL_GATE=1` | Opt into Claude's interactive approval UI; by default, unapproved tools are denied without interrupting the run. |
 | `CEZ_FOLLOWUPS=1` | Turn on the global follow-up **Inbox**: agents are asked to leave follow-ups in `todos.json` when they finish, and the Inbox view appears. Off by default — each task's own **Notes** handoff journal runs either way. |
@@ -394,6 +431,17 @@ built-in entries. `auto` — send no model at all and let the CLI decide — is
 always available, and a model you pinned by hand stays selectable even when it
 is no longer advertised.
 
+**Cloudflare Workers AI through OpenCode.** OpenCode ships Workers AI as a provider, so its
+models (`cloudflare-workers-ai/@cf/…`) appear in the OpenCode model picker once OpenCode can
+reach them. Log in once with OpenCode itself — `opencode auth login -p cloudflare-workers-ai`
+(or `/connect` in its TUI) — and enter an API token scoped to Workers AI and, when asked, your
+account id. If `CLOUDFLARE_ACCOUNT_ID` is already set in your shell OpenCode does not ask; keep
+it set where cezar runs too, and cezar forwards it to OpenCode. Pick a model that supports tool
+calling (for example `@cf/moonshotai/kimi-k2.7-code`) — a chat-only model cannot edit files.
+cezar never forwards the key from the environment by default, because `CLOUDFLARE_API_KEY` is
+also the name of Cloudflare's account-wide Global API Key; set
+`CEZ_ENV_PASSTHROUGH=CLOUDFLARE_API_KEY` if you deliberately keep a Workers AI token there.
+
 **Pick a backend at three levels** (most specific wins):
 
 1. **Config default** — `"defaultRunner": "codex"` in `.ai/cezar/config.json`.
@@ -462,17 +510,58 @@ npx cezar-run server-install --platform ubuntu-vps \
 
 `--bind-host` is only needed when the proxy runs in a **container** (Traefik
 can't reach the host's loopback); a host-installed proxy uses the `127.0.0.1`
-default. In this mode **your proxy must enforce authentication** — cezar has
-none of its own. [Details →](server-install/ubuntu-vps.md#the-box-already-has-a-reverse-proxy-dokploy-coolify-caddy)
+default. Without `CEZ_AUTH_REQUIRED=1`, **your proxy must enforce
+authentication**. Managed Cezar logins can also protect this service when
+enabled. [Details →](server-install/ubuntu-vps.md#the-box-already-has-a-reverse-proxy-dokploy-coolify-caddy)
 
 | Provider | `--platform` | Public front | Guide |
 |----------|--------------|--------------|-------|
-| Ubuntu / Debian VPS | `ubuntu-vps` | nginx + Let's Encrypt HTTPS, htpasswd login, systemd | [Step-by-step →](server-install/ubuntu-vps.md) |
+| Ubuntu / Debian VPS | `ubuntu-vps` | nginx + Let's Encrypt HTTPS, htpasswd by default or managed Cezar login, systemd | [Step-by-step →](server-install/ubuntu-vps.md) |
 | Ubuntu + existing proxy | `ubuntu-vps --external-proxy` | your Dokploy/Traefik/Caddy front; cezar ships the service only | [Step-by-step →](server-install/ubuntu-vps.md#the-box-already-has-a-reverse-proxy-dokploy-coolify-caddy) |
-| macOS + ngrok | `macosx-ngrok` | ngrok tunnel + `--basic-auth`, launchd | [Step-by-step →](server-install/macosx-ngrok.md) |
+| macOS + ngrok | `macosx-ngrok` | ngrok tunnel + `--basic-auth` by default or managed Cezar login, launchd | [Step-by-step →](server-install/macosx-ngrok.md) |
 
 See the **[Remote access overview](server-install/README.md)** for how it
 works and how to redeploy new versions.
+
+## Managed workspace logins
+
+Managed access is off by default. It adds owner-managed accounts and project
+membership: **Owners** use the full cockpit and manage members; **Viewers** see
+only the run summary for projects the owner shares with them. Agent execution
+remains an owner privilege.
+
+1. Persist `CEZ_AUTH_REQUIRED=1` in the Cezar service launcher and restart it.
+   For a managed Ubuntu/macOS install, set that variable in the shell and run
+   `cezar server-install --reconfigure autostart`; for a custom service, edit
+   its launcher and restart it yourself. Custom reverse proxies must also
+   replace `X-Real-IP` with the connecting client's address; set
+   `CEZ_AUTH_TRUST_PROXY=1` in that launcher only when the Cezar listener is
+   reachable solely through that proxy.
+2. In a local interactive shell using the service account and the same
+   `CEZ_HOME`, run `cezar auth bootstrap` to create the first owner. The auth
+   command also needs `CEZ_AUTH_REQUIRED=1` in its own environment:
+
+   ```bash
+   CEZ_AUTH_REQUIRED=1 cezar auth bootstrap
+   CEZ_AUTH_REQUIRED=1 cezar auth reset-password <username>
+   CEZ_AUTH_REQUIRED=1 cezar auth repair
+   ```
+
+   In PowerShell, use `$env:CEZ_AUTH_REQUIRED='1'` before those commands.
+   `repair` is only for a malformed/unreadable auth store; it backs up that file
+   and replaces it with a new owner, so members and invitations must be created
+   again. For a valid store, use `reset-password`.
+3. Owners invite people from **Settings → Members**, choose their role, and
+   grant viewers access to selected projects. The invitee sets their own
+   username and password through the one-use link.
+
+Keep the existing proxy Basic Auth and TLS during setup. The bundled Ubuntu/nginx
+and macOS/ngrok installers remove their Basic Auth only on a later
+`server-install --reconfigure autostart` after Cezar reports a ready auth store
+and rejects an anonymous owner-only request; a failed proxy reload restores the
+previous config. If you use an external proxy, verify a login and anonymous
+401 first, then remove its Basic Auth manually while keeping TLS. Cezar fails
+closed while the auth store is missing or damaged.
 
 ---
 

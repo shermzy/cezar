@@ -39,10 +39,10 @@ function renderPalette(onPick = vi.fn()) {
 }
 
 describe('TemplatePalette', () => {
-  it('lists the six built-ins and hands the picked one over', () => {
+  it('lists the seven built-ins and hands the picked one over', () => {
     const paths = stubTemplates({ templates: [] })
     const onPick = renderPalette()
-    expect(screen.getAllByRole('button', { name: /^Use this:/ })).toHaveLength(6)
+    expect(screen.getAllByRole('button', { name: /^Use this:/ })).toHaveLength(7)
     expect(screen.getByText('Every day at 04:00')).not.toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Use this: Flaky test hunt' }))
     expect(onPick).toHaveBeenCalledWith(expect.objectContaining({
@@ -50,6 +50,13 @@ describe('TemplatePalette', () => {
       kind: 'schedule',
       schedule: { type: 'weekly', day: 2, hour: 2, minute: 0 },
       dispatch: { maxSubtasks: 8, reviewChild: true },
+    }))
+    fireEvent.click(screen.getByRole('button', { name: 'Use this: Review new pull requests' }))
+    expect(onPick).toHaveBeenLastCalledWith(expect.objectContaining({
+      kind: 'github',
+      events: ['pull_request.opened'],
+      workflow: 'builtin:pr-review',
+      prompt: expect.stringContaining('{{github.url}}'),
     }))
     // The other-projects list is not fetched until its tab opens.
     expect(paths).not.toContain('/api/v1/workspace/automation-templates')

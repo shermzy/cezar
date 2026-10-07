@@ -13,7 +13,7 @@ import { MAX_REF } from './task-refs.ts';
 import { workflowDefSchema } from '../workflows/types.ts';
 // A contract VALUE, like `workspaceUiStateSchema` in `workspace/migrations.ts`: the persisted
 // `dispatch` object and its wire half are literally the same schema, so they cannot drift.
-import { dispatchSchema, trackerAssociationSchema, trackerAutomationEventSchema } from '@open-mercato/cezar-contract';
+import { deliveryRecordSchema, dispatchSchema, specialistSnapshotSchema, trackerAssociationSchema, trackerAutomationEventSchema } from '@open-mercato/cezar-contract';
 
 import { RUNNER_IDS } from '../core/agent-runner.ts';
 
@@ -172,6 +172,8 @@ export const runRecordSchema = z.object({
    *  own selection — an override for Claude says nothing about which Codex account a mixed
    *  workflow's codex step should use. Absent = follow the project. */
   agentProfile: z.string().optional(),
+  /** Immutable role prompt captured before the run entered the queue. */
+  specialistSnapshot: specialistSnapshotSchema.optional().catch(undefined),
   /** Echo of the extra system prompt this run actually used (R2): the
    *  `POST /api/runs` override, or the `config.json` default it fell back to.
    *  Deliberately NOT the full composed prompt — skill bodies and the handoff
@@ -242,6 +244,8 @@ export const runRecordSchema = z.object({
    *  a `dispatch` that no longer fits must drop the FIELD, never the whole index. The run then reads
    *  as an ordinary flat task — degraded, but running. */
   dispatch: dispatchSchema.optional().catch(undefined),
+  /** Explicit read-only delivery tracking; malformed additive state degrades to absent. */
+  delivery: deliveryRecordSchema.optional().catch(undefined),
   status: z.enum(['queued', 'running', 'waiting', 'review', 'done', 'failed', 'cancelled']),
   /** Sub-state of `running` (spec 2026-07-18-subagent-monitoring-status, #490):
    *  `monitoring` while the agent is still working on its own downstream work.
@@ -262,6 +266,16 @@ export const runRecordSchema = z.object({
    *  parked. Invariant: only a `waiting` run carries it — `updateRun` and
    *  `reconcileLoadedRun` retire it on any other status, so no caller has to. */
   askParked: z.boolean().optional(),
+  /**
+   * When the run's session ended — the inactivity timer, a crash, a cezar restart — while a
+   * `CEZ:ASK` question was still unanswered. The run is `failed` on the record (no process, no
+   * slot), but the question is still the user's to answer, so the cockpit keeps it under
+   * "needs you" instead of filing it as an outcome; Continue (or the ask card) reopens the session
+   * with the answer. Additive and optional (BACKWARD_COMPATIBILITY §3). Invariant: only a
+   * `failed` run carries it — `updateRun` and `reconcileLoadedRun` retire it on any other status,
+   * so a Continue, a Finish or a cancel clears it without the caller's help.
+   */
+  awaitingAnswerSince: z.string().datetime().optional().catch(undefined),
   /**
    * Exact deadline at which a run stopped by a provider USAGE LIMIT resumes itself
    * (spec 2026-08-03-auto-resume-after-usage-limit) — the reset instant the provider named plus a
@@ -475,6 +489,14 @@ function clearPendingAutoResume(run: RunRecord): void {
 }
 
 /**
+ * Archiving is resigning from a task, so it also resigns from the question the task was left
+ * waiting on — an archived run must not keep a "needs you" signal alive in the attention layer.
+ */
+function clearAwaitingAnswer(run: RunRecord): void {
+  run.awaitingAnswerSince = undefined;
+}
+
+/**
  * Archiving is resigning from a task, so it retires the pin too (#935) — a pin on a task the
  * user has filed away is stale by definition, and the archived view collapses into one bucket
  * anyway, so a surviving pin would be invisible state waiting to surprise whoever unarchives.
@@ -650,6 +672,65 @@ function legacyPrRefs(run: RunRecord): RunPrRef[] {
   return refs;
 }
 
+const AUTHORITATIVE_PR_ORIGINS = new Set<RunPrRef['origin']>(['created', 'marker', 'legacy']);
+
+/** The PR associations delivery evidence is allowed to observe. Derived numbers from task text
+ * remain display-only. The marker fallback keeps older records whose persisted ref list predates
+ * `markerRefs.pr` compatible with the same provenance rules as `legacyPrRefs`. */
+export function authoritativePrRefs(run: RunRecord): RunPrRef[] {
+  const source = run.prRefs && run.prRefs.length > 0 ? run.prRefs : legacyPrRefs(run);
+  const refs = source
+    .filter((ref) => AUTHORITATIVE_PR_ORIGINS.has(ref.origin))
+    .map((ref) => ({ ...ref }));
+  const marker = run.markerRefs?.pr;
+  if (marker !== undefined && Number.isInteger(marker) && marker > 0 && marker < MAX_REF) {
+    const markerUrl = refUrlNumber(run.referencedPullRequestUrl) === marker
+      ? run.referencedPullRequestUrl
+      : undefined;
+    const existingMarker = refs.find((ref) => ref.origin === 'marker' && ref.number === marker);
+    if (existingMarker && markerUrl && !existingMarker.url) existingMarker.url = markerUrl;
+    else if (!refs.some((ref) => ref.number === marker)) {
+      refs.push({
+        number: marker,
+        ...(markerUrl ? { url: markerUrl } : {}),
+        origin: 'marker',
+        at: run.createdAt,
+      });
+    }
+  }
+  if (refs.length === 0) {
+    const created = refUrlNumber(run.pullRequestUrl);
+    if (created !== undefined) refs.push({ number: created, url: run.pullRequestUrl, origin: 'created', at: run.createdAt });
+  }
+  const byNumber = new Map<number, RunPrRef>();
+  for (const ref of refs) if (!byNumber.has(ref.number)) byNumber.set(ref.number, ref);
+  return [...byNumber.values()];
+}
+
+/** Stable association identity shared by delivery refresh and store invalidation. */
+export function prAssociationSignature(run: RunRecord): string {
+  const tokens = authoritativePrRefs(run).map((ref) => `${ref.number}:${ref.url ?? ''}`);
+  const marker = run.markerRefs?.pr;
+  if (marker !== undefined) {
+    const markerUrl = Number.isInteger(marker) && marker > 0 && marker < MAX_REF && refUrlNumber(run.referencedPullRequestUrl) === marker
+      ? run.referencedPullRequestUrl
+      : '';
+    tokens.push(`marker:${marker}:${markerUrl}`);
+  }
+  return tokens.sort().join('|');
+}
+
+function invalidateDeliveryAfterAssociationChange(run: RunRecord, before: string): void {
+  if (!run.delivery || prAssociationSignature(run) === before) return;
+  run.delivery = {
+    ...run.delivery,
+    status: 'unknown',
+    checkedAt: new Date().toISOString(),
+    stale: true,
+    reason: 'Authoritative pull request association changed; refresh delivery evidence.',
+  };
+}
+
 function primaryPrRef(refs: RunPrRef[]): RunPrRef | undefined {
   return refs.reduce<RunPrRef | undefined>((best, ref) =>
     !best || PR_REF_RANK[ref.origin] < PR_REF_RANK[best.origin] ? ref : best,
@@ -758,9 +839,14 @@ export function reconcileLoadedRun(run: RunRecord, opts?: { keepLive?: boolean }
     !opts?.keepLive &&
     (run.status === 'running' || run.status === 'queued' || run.status === 'waiting')
   ) {
+    // A run parked on an unanswered `CEZ:ASK` still owes the user that question — the same
+    // answer `RunManager.recover()` gives, so this reader and the manager agree on "needs you".
+    const askParked = run.status === 'waiting' && run.askParked === true;
     run.status = 'failed';
     run.error = 'interrupted — cezar process exited during the run';
     run.finishedAt = run.finishedAt ?? new Date().toISOString();
+    // Stamped from `finishedAt`, so every cold read of the same record agrees on the instant.
+    if (askParked) run.awaitingAnswerSince = run.finishedAt;
     for (const step of run.steps) {
       if (step.status === 'running' || step.status === 'waiting') step.status = 'failed';
     }
@@ -773,6 +859,8 @@ export function reconcileLoadedRun(run: RunRecord, opts?: { keepLive?: boolean }
   // hours) — `RunManager.recover()` re-arms it from this field. It can only mean
   // anything on a `failed` run, so anywhere else it is stale bookkeeping.
   if (run.status !== 'failed') run.autoResumeAt = undefined;
+  // Likewise an unanswered question only means anything on the `failed` run it stopped.
+  if (run.status !== 'failed') run.awaitingAnswerSince = undefined;
   // The wake counter is intentionally process-local, so a restarted process
   // starts a fresh epoch instead of displaying a stale cap.
   run.monitoringWakeCapReached = undefined;
@@ -944,6 +1032,7 @@ export class RunStore extends EventEmitter {
     runner?: RunnerId;
     /** Composer's per-task agent account (spec 2026-07-29-agent-profiles). */
     agentProfile?: string;
+    specialistSnapshot?: RunRecord['specialistSnapshot'];
     generateFollowups?: boolean;
     autonomous?: boolean;
     worktree?: false;
@@ -965,6 +1054,7 @@ export class RunStore extends EventEmitter {
       model: input.model,
       runner: input.runner,
       agentProfile: input.agentProfile,
+      specialistSnapshot: input.specialistSnapshot,
       generateFollowups: input.generateFollowups,
       autonomous: input.autonomous,
       worktree: input.worktree,
@@ -995,6 +1085,7 @@ export class RunStore extends EventEmitter {
   updateRun(id: string, patch: Partial<Omit<RunRecord, 'id' | 'steps'>>): RunRecord | undefined {
     const run = this.runs.get(id);
     if (!run) return undefined;
+    const associationBefore = prAssociationSignature(run);
     if (Object.prototype.hasOwnProperty.call(patch, 'issueNumber')) {
       delete run.referencedIssueNumberSeeded;
     }
@@ -1017,6 +1108,11 @@ export class RunStore extends EventEmitter {
     if (normalized.status && normalized.status !== 'waiting') {
       normalized.askParked = undefined;
     }
+    // An unanswered question belongs to the `failed` run its closed session left behind: the
+    // Continue that answers it (`running`/`queued`), and every settlement, retire it.
+    if (normalized.status && normalized.status !== 'failed') {
+      normalized.awaitingAnswerSince = undefined;
+    }
     // Seed the list from the old values BEFORE applying a patch. Callers that update a scalar
     // projection often provide the replacement URL/number in the same patch; seeding afterward
     // would make the historical association unrecoverable.
@@ -1032,6 +1128,7 @@ export class RunStore extends EventEmitter {
     if (normalized.prNumber !== undefined) {
       appendPrRefToRun(run, { number: normalized.prNumber, origin: 'derived' });
     }
+    invalidateDeliveryAfterAssociationChange(run, associationBefore);
     this.touch(run);
     return run;
   }
@@ -1125,6 +1222,7 @@ export class RunStore extends EventEmitter {
     run.archivedAt = archived ? new Date().toISOString() : undefined;
     if (archived) {
       clearPendingAutoResume(run);
+      clearAwaitingAnswer(run);
       clearPin(run);
     }
     this.touch(run);
@@ -1155,10 +1253,16 @@ export class RunStore extends EventEmitter {
   archiveFinished(): number {
     let count = 0;
     for (const run of this.runs.values()) {
-      if (!run.archived && ['done', 'failed', 'cancelled'].includes(run.status)) {
+      // An unanswered question is a gate, not an outcome — like `review`, the bulk sweep leaves it.
+      if (
+        !run.archived &&
+        ['done', 'failed', 'cancelled'].includes(run.status) &&
+        run.awaitingAnswerSince === undefined
+      ) {
         run.archived = true;
         run.archivedAt = new Date().toISOString();
         clearPendingAutoResume(run);
+        clearAwaitingAnswer(run);
         clearPin(run);
         this.touch(run);
         count++;
@@ -1210,6 +1314,8 @@ export class RunStore extends EventEmitter {
    *   - and a `failed` run with a pending `autoResumeAt` is not a done item AT ALL
    *     (`isScheduledResume`, spec 2026-08-03-auto-resume-after-usage-limit): it has an
    *     appointment to pick the work back up, so there is no outcome to have missed.
+   *   - nor is a `failed` run still `awaitingAnswerSince` a question: it sits under
+   *     "needs you", and its signal is that, not an unread outcome.
    *
    *  Keeping the two rules identical is what makes the returned count the number the
    *  cockpit's unread badge was showing. The `autoResumeAt` clause is the one that drifted
@@ -1232,6 +1338,7 @@ export class RunStore extends EventEmitter {
         !run.archived &&
         (run.status === 'done' || run.status === 'failed') &&
         !(run.status === 'failed' && run.autoResumeAt !== undefined) &&
+        !(run.status === 'failed' && run.awaitingAnswerSince !== undefined) &&
         run.finishedAt !== undefined &&
         (run.seenAt === undefined || run.seenAt < run.finishedAt);
       if (!unread) continue;
@@ -1393,6 +1500,7 @@ export class RunStore extends EventEmitter {
   applyMarkerRefs(runId: string, refs: { pr?: number; issue?: number }): RunRecord | undefined {
     const run = this.runs.get(runId);
     if (!run || (refs.pr === undefined && refs.issue === undefined)) return run;
+    const associationBefore = prAssociationSignature(run);
     run.markerRefs = {
       ...run.markerRefs,
       ...(refs.pr !== undefined ? { pr: refs.pr } : {}),
@@ -1421,6 +1529,7 @@ export class RunStore extends EventEmitter {
         this.repoHandle,
       );
     }
+    invalidateDeliveryAfterAssociationChange(run, associationBefore);
     this.touch(run);
     return run;
   }
@@ -1429,7 +1538,11 @@ export class RunStore extends EventEmitter {
   recordPrRef(runId: string, ref: Omit<RunPrRef, 'at'> & { at?: string }): RunRecord | undefined {
     const run = this.runs.get(runId);
     if (!run || !Number.isInteger(ref.number) || ref.number <= 0 || ref.number >= MAX_REF) return run;
-    if (appendPrRefToRun(run, ref)) this.touch(run);
+    const associationBefore = prAssociationSignature(run);
+    if (appendPrRefToRun(run, ref)) {
+      invalidateDeliveryAfterAssociationChange(run, associationBefore);
+      this.touch(run);
+    }
     return run;
   }
 

@@ -8,6 +8,7 @@ import {
   WorkflowIcon,
   ZapIcon,
   TicketIcon,
+  BotIcon,
 } from 'lucide-react'
 import type { ComponentType, SVGProps } from 'react'
 import type { TrackerKind } from '@open-mercato/cezar-api-client'
@@ -49,6 +50,7 @@ export type NavItem = {
 export const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Tasks', icon: ListChecksIcon, match: ['/', '/tasks', '/compare'], badge: 'tasks-unread' },
   { to: '/board', label: 'Board', icon: SquareKanbanIcon, match: ['/board'] },
+  { to: '/agents', label: 'Agents', icon: BotIcon, match: ['/agents'] },
   { to: '/inbox', label: 'Inbox', icon: InboxIcon, match: ['/inbox'], badge: 'inbox-count', inbox: true },
   { to: '/git', label: 'Git', icon: GitBranchIcon, match: ['/git'] },
   { to: '/github', label: 'GitHub', icon: GithubIcon, match: ['/github'], forge: true },

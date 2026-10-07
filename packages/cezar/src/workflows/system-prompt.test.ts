@@ -110,6 +110,15 @@ describe('systemPrompt end-to-end (dry run)', () => {
   let store: RunStore;
   let manager: RunManager;
   const savedEnv: Record<string, string | undefined> = {};
+  const availableSkillsPrompt = () => {
+    const skillPath = join(repoRoot, '.ai/skills/om-auto-review-pr/SKILL.md');
+    return [
+      '## Available skills',
+      'These skills are installed for this project. When one clearly fits the task, read its file with the Read tool and follow it; when none fits, ignore this list. Do not mention the list to the user unless asked.',
+      '',
+      '- om-auto-review-pr — ' + SKILL_DESCRIPTION + ' (' + skillPath + ')',
+    ].join('\n');
+  };
 
   beforeAll(async () => {
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-sysprompt-'));
@@ -122,6 +131,7 @@ describe('systemPrompt end-to-end (dry run)', () => {
     savedEnv.CEZ_AUTONAME = process.env.CEZ_AUTONAME;
     savedEnv.CEZ_DISPATCH = process.env.CEZ_DISPATCH;
     savedEnv.CEZ_AUTOMATIONS = process.env.CEZ_AUTOMATIONS;
+    savedEnv.CEZ_SKILL_CATALOG = process.env.CEZ_SKILL_CATALOG;
     // The dispatch and automations tests below set and clear this; restore whatever the outer process had.
     savedEnv.CEZ_API_URL = process.env.CEZ_API_URL;
     process.env.CEZ_DRY_RUN = '1';
@@ -133,6 +143,7 @@ describe('systemPrompt end-to-end (dry run)', () => {
     // reachable (spec 2026-09-13-automations-from-prompt); the goldens run without it and the
     // part is pinned by its own tests below.
     delete process.env.CEZ_AUTOMATIONS;
+    delete process.env.CEZ_SKILL_CATALOG;
     // The global inbox is opt-in (#471). These assertions are about prompt composition and the
     // per-run opt-out, so they run on an inbox-enabled server; the gate itself is covered by
     // the suite below.
@@ -271,9 +282,10 @@ describe('systemPrompt end-to-end (dry run)', () => {
     const prompt = capturedSystemPrompt();
     expect(prompt).toContain('node "$CEZ_BIN" automation');
     expect(prompt).toContain(CONFIG_PROMPT);
-    // Dispatch is off in this suite, so the automations part is the only cockpit part composed —
-    // ahead of the extra prompt, which may amend it.
-    expect(prompt).toBe(composeSystemPrompt(AUTOMATIONS_PROMPT, CONFIG_PROMPT, HANDOFF_INSTRUCTIONS));
+    // Dispatch is off; automations and catalog precede the extra prompt and handoff contract.
+    expect(prompt).toBe(
+      composeSystemPrompt(AUTOMATIONS_PROMPT, availableSkillsPrompt(), CONFIG_PROMPT, HANDOFF_INSTRUCTIONS),
+    );
   });
 
   it('automations on but unreachable (headless), or opted out: no task is taught the CLI', async () => {
@@ -299,8 +311,8 @@ describe('systemPrompt end-to-end (dry run)', () => {
     expect(record?.status).toMatch(/^(done|review)$/);
     expect(record?.systemPrompt).toBe(CONFIG_PROMPT);
     const prompt = capturedSystemPrompt();
-    // Composition: extra prompt first (no skill on this step), contract last.
-    expect(prompt).toBe(composeSystemPrompt(CONFIG_PROMPT, HANDOFF_INSTRUCTIONS));
+    // Composition: catalog first (no skill selected), extra prompt next, contract last.
+    expect(prompt).toBe(composeSystemPrompt(availableSkillsPrompt(), CONFIG_PROMPT, HANDOFF_INSTRUCTIONS));
   }, 30_000);
 
 
@@ -434,7 +446,7 @@ describe('systemPrompt end-to-end (dry run)', () => {
     const record = store.getRun(id);
     expect(record?.systemPrompt).toBe(OVERRIDE_PROMPT);
     const prompt = capturedSystemPrompt();
-    expect(prompt).toBe(composeSystemPrompt(OVERRIDE_PROMPT, HANDOFF_INSTRUCTIONS));
+    expect(prompt).toBe(composeSystemPrompt(availableSkillsPrompt(), OVERRIDE_PROMPT, HANDOFF_INSTRUCTIONS));
     expect(prompt).not.toContain(CONFIG_PROMPT);
   }, 30_000);
 
@@ -498,7 +510,9 @@ describe('systemPrompt end-to-end (dry run)', () => {
     const id = await runToEnd({ task: 'do the thing quietly', generateFollowups: false });
     const record = store.getRun(id);
     expect(record?.generateFollowups).toBe(false);
-    expect(capturedSystemPrompt()).toBe(composeSystemPrompt(CONFIG_PROMPT, HANDOFF_ONLY_INSTRUCTIONS));
+    expect(capturedSystemPrompt()).toBe(
+      composeSystemPrompt(availableSkillsPrompt(), CONFIG_PROMPT, HANDOFF_ONLY_INSTRUCTIONS),
+    );
     expect(capturedSystemPrompt()).not.toContain('CEZ_TODOS_FILE');
     expect(existsSync(todosFile)).toBe(false);
     // The opt-out must survive an inherited CEZ_TODOS_FILE (nested cezar):
@@ -517,7 +531,7 @@ describe('systemPrompt end-to-end (dry run)', () => {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     expect(capturedSystemPrompt(1)).toBe(
-      composeSystemPrompt(CONFIG_PROMPT, HANDOFF_ONLY_INSTRUCTIONS),
+      composeSystemPrompt(availableSkillsPrompt(), CONFIG_PROMPT, HANDOFF_ONLY_INSTRUCTIONS),
     );
     expect(capturedSystemPrompt(1)).not.toContain('CEZ_TODOS_FILE');
     expect(existsSync(todosFile)).toBe(false);
