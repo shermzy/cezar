@@ -103,7 +103,7 @@ export function MembersSection() {
         <h2 className="font-semibold">Invite someone</h2>
         <form onSubmit={createInvite} className="mt-4 space-y-4">
           <label className="block space-y-1.5 text-sm font-medium">Role
-            <select value={role} onChange={(event) => { setRole(event.target.value as AuthRole); setProjectEntryIds([]) }} className="h-10 w-full rounded-md border border-input bg-background px-3 font-normal">
+            <select value={role} onChange={(event) => { setRole(event.target.value as AuthRole); setProjectEntryIds([]) }} className="h-10 w-full rounded-md border border-input bg-background px-3 font-normal outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50">
               <option value="viewer">Viewer — read-only project summaries</option>
               <option value="owner">Owner — full cockpit and member management</option>
             </select>
@@ -145,8 +145,8 @@ function MemberRow({ member, projects, onSave, onRevokeSessions, onRemove }: {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div><p className="font-medium">{member.username}</p><p className="mt-0.5 text-xs text-muted-foreground">{member.id}</p></div>
         <div className="flex flex-wrap items-center gap-2">
-          <select aria-label={`${member.username} role`} value={role} onChange={(event) => setRole(event.target.value as AuthRole)} className="h-9 rounded-md border border-input bg-background px-2 text-sm"><option value="owner">Owner</option><option value="viewer">Viewer</option></select>
-          <select aria-label={`${member.username} status`} value={status} onChange={(event) => setStatus(event.target.value as 'active' | 'suspended')} className="h-9 rounded-md border border-input bg-background px-2 text-sm"><option value="active">Active</option><option value="suspended">Suspended</option></select>
+          <select aria-label={`${member.username} role`} value={role} onChange={(event) => setRole(event.target.value as AuthRole)} className="h-9 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"><option value="owner">Owner</option><option value="viewer">Viewer</option></select>
+          <select aria-label={`${member.username} status`} value={status} onChange={(event) => setStatus(event.target.value as 'active' | 'suspended')} className="h-9 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"><option value="active">Active</option><option value="suspended">Suspended</option></select>
           <button disabled={!changed} onClick={() => void onSave(member.id, { role, status, projectEntryIds: role === 'viewer' ? grants : [] })} className="h-9 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground disabled:opacity-45">Save</button>
           <button onClick={() => void onRevokeSessions(member.id)} className="h-9 rounded-md border border-border px-3 text-sm hover:bg-muted">Revoke sessions</button>
           <button onClick={() => void onRemove(member.id)} className="h-9 rounded-md border border-border px-3 text-sm text-destructive hover:bg-destructive/5">Remove</button>
