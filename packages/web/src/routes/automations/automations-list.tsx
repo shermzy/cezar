@@ -1,7 +1,9 @@
 import { PlusIcon, ZapIcon } from 'lucide-react'
 import { useState } from 'react'
+import { Link as RouterLink } from 'react-router'
 import type { AutomationsResponse } from '@open-mercato/cezar-api-client'
 
+import { useHealth } from '@/api/queries'
 import { CenteredState } from '@/components/centered-state'
 import { Segmented, type SegmentedOption } from '@/components/segmented'
 import { StatusDot } from '@/components/status-dot'
@@ -44,6 +46,7 @@ export function AutomationsList({
   onViewChange: (view: AutomationsView) => void
 }) {
   const [railOpen, setRailOpen] = useState(false)
+  const health = useHealth()
   const now = Date.now()
   const upcoming = data ? nextRuns(data.automations, now, data.timeZone, 12) : []
   const pollCount = data ? data.automations.filter((automation) => automation.kind === 'github' && automation.enabled).length : 0
@@ -79,6 +82,11 @@ export function AutomationsList({
             New automation
           </Link>
         </Button>
+        {health.data?.capabilities?.singleProject === true ? null : (
+          <Button variant="outline" size="sm" asChild className="shrink-0">
+            <RouterLink to="/workspace/automations">Workspace schedules</RouterLink>
+          </Button>
+        )}
       </header>
 
       {error !== undefined ? (

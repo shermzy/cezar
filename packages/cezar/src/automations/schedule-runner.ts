@@ -15,8 +15,8 @@ import type { AutomationLogRecord, AutomationReceipt, ScheduleAutomationDefiniti
  *
  * Receipts are per occurrence (`schedule:<instant>`), so a second cockpit on the same project,
  * or a re-armed timer, meets the receipt and logs `duplicate` — never a second launch. A held
- * lease and a duplicate are not failures; they advance this process's own `nextRunAt` and do not
- * count towards the three-strike auto-pause.
+ * A duplicate advances this process's `nextRunAt`; a held lease leaves the occurrence due so the
+ * scheduler can retry after its bounded backoff. Neither counts towards the three-strike auto-pause.
  */
 
 export const SCHEDULE_GRACE_MS = 10 * 60_000;
@@ -44,6 +44,10 @@ export interface ScheduleRunnerHandle {
   timeZone: string;
   /** Absent = detection only (tests, or a cockpit that cannot launch): nothing is launched. */
   launch?: ScheduleLauncher;
+  /** Called under the schedule lease before reserving a receipt. */
+  prepare?: () => Promise<void | boolean | (() => void)>;
+  /** Workspace child definitions live outside this store, so pause their local target state. */
+  onAutoPause?: (definition: ScheduleAutomationDefinition, failures: number) => void;
   onChange?: (automationId: string, revision: number) => void;
   now?: () => number;
 }
@@ -126,12 +130,16 @@ export class ScheduleRunner {
     const { store } = this.handle;
     const lease = store.acquireLease();
     if (!lease) {
-      // Another cockpit holds the project; it will fire this occurrence. Move our own timer on
-      // without counting a failure.
-      if (options.advance) this.advance(definition, Date.parse(occurrence.at), now);
+      // The lease may belong to a different scheduled definition in this repo, so keep this
+      // occurrence due and let the scheduler retry after its bounded lease backoff.
       return { result: 'lease-held', occurrenceAt: occurrence.at };
     }
+    let releasePrepared: (() => void) | undefined;
     try {
+      if (!lease.isValid()) return { result: 'lease-held', occurrenceAt: occurrence.at };
+      const prepared = await this.handle.prepare?.();
+      if (prepared === false) return { result: 'skipped', occurrenceAt: occurrence.at };
+      if (typeof prepared === 'function') releasePrepared = prepared;
       if (!lease.isValid()) return { result: 'lease-held', occurrenceAt: occurrence.at };
       const eventId = occurrence.trigger === 'manual' ? `manual:${occurrence.at}` : `schedule:${occurrence.at}`;
       const receipt = store.reserveReceipt({ automationId: definition.id, revision: definition.revision, eventId, occurrenceAt: occurrence.at });
@@ -142,8 +150,11 @@ export class ScheduleRunner {
       }
       return await this.launchReserved(definition, occurrence, receipt, now, options, lease);
     } finally {
-      lease.release();
-      try { store.maybeCompact(); } catch { /* append-only state remains readable; next fire retries */ }
+      try { releasePrepared?.(); }
+      finally {
+        lease.release();
+        try { store.maybeCompact(); } catch { /* append-only state remains readable; next fire retries */ }
+      }
     }
   }
 
@@ -210,6 +221,12 @@ export class ScheduleRunner {
       };
     });
     if (failures >= SCHEDULE_AUTO_PAUSE_AFTER && definition.enabled) {
+      if (this.handle.onAutoPause) {
+        this.handle.onAutoPause(definition, failures);
+        store.appendLog({ automationId: definition.id, revision: definition.revision, result: 'failed', reason: `This repository was paused after ${SCHEDULE_AUTO_PAUSE_AFTER} consecutive launch failures; edit the task or schedule to resume it.` });
+        this.handle.onChange?.(definition.id, definition.revision);
+        return;
+      }
       const { id, revision, createdAt: _c, updatedAt: _u, ...editable } = definition;
       const paused = store.update(id, revision, { ...editable, enabled: false });
       store.appendLog({ automationId: id, revision: paused.revision, result: 'failed', reason: `Paused after ${SCHEDULE_AUTO_PAUSE_AFTER} consecutive launch failures; fix the task and enable it again.` });

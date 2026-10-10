@@ -101,6 +101,8 @@ export const automationDefinitionObjectSchema = z
     filters: automationFiltersSchema.optional(),
     trackerTrigger: trackerTriggerSchema.optional(),
     schedule: automationScheduleSchema.optional(),
+    /** Workspace schedule target-state reset generation. */
+    workspaceRuntimeRevision: z.number().int().nonnegative().optional(),
     task: automationTaskSchema,
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime(),
@@ -182,6 +184,10 @@ export const automationRuntimeStateSchema = z
     /** schedule kind (spec 2026-09-14): the next occurrence's instant and the last fired one's. */
     nextRunAt: z.string().datetime().optional(),
     lastRunAt: z.string().datetime().optional(),
+    /** Workspace schedule target paused after repeated launch failures. */
+    autoPaused: z.boolean().optional(),
+    /** Workspace schedule's target-local state reset generation. */
+    workspaceRuntimeRevision: z.number().int().nonnegative().optional(),
     etags: z.record(z.string(), z.string()).optional(),
     backoffUntil: z.string().datetime().optional(),
     consecutiveFailures: z.number().int().nonnegative().optional(),

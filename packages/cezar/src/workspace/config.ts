@@ -296,15 +296,20 @@ function parseWorkspaceConfig(raw: string): WorkspaceConfig | null {
 
 /** The snapshot is only worth restoring while it still holds projects — an
  *  empty one carries no information the defaults do not already have. */
-async function loadWorkspaceConfigBackup(path: string): Promise<WorkspaceConfig | null> {
-  let raw: string;
+type WorkspaceConfigRead = { raw: string } | { error: 'missing' | 'unreadable' };
+
+async function readWorkspaceConfigFile(path: string): Promise<WorkspaceConfigRead> {
   try {
-    raw = await readFile(workspaceConfigBackupPath(path), 'utf8');
-  } catch {
-    return null;
+    return { raw: await readFile(path, 'utf8') };
+  } catch (error) {
+    return { error: (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unreadable' };
   }
-  const parsed = parseWorkspaceConfig(raw);
-  return parsed && parsed.projects.length > 0 ? parsed : null;
+}
+
+export type WorkspaceConfigLoadStatus = 'primary' | 'backup' | 'empty-default' | 'degraded';
+export interface WorkspaceConfigLoad {
+  config: WorkspaceConfig;
+  status: WorkspaceConfigLoadStatus;
 }
 
 /**
@@ -324,30 +329,46 @@ async function loadWorkspaceConfigBackup(path: string): Promise<WorkspaceConfig 
  * will also WRITE passes the path it resolved itself — see
  * `mergeWriteWorkspaceConfig` for why resolving it twice is a data-loss bug.
  */
-export async function loadWorkspaceConfig(path: string = workspaceConfigPath()): Promise<WorkspaceConfig> {
-  let raw: string | null = null;
-  try {
-    raw = await readFile(path, 'utf8');
-  } catch {
-    // missing/unreadable — the backup below is the next chance
+export async function loadWorkspaceConfigWithStatus(path: string = workspaceConfigPath()): Promise<WorkspaceConfigLoad> {
+  const primary = await readWorkspaceConfigFile(path);
+  if ('raw' in primary && primary.raw.trim() !== '') {
+    const parsed = parseWorkspaceConfig(primary.raw);
+    if (parsed) return { config: parsed, status: 'primary' };
   }
-  if (raw !== null && raw.trim() !== '') {
-    const parsed = parseWorkspaceConfig(raw);
-    if (parsed) return parsed;
-  }
-  const restored = await loadWorkspaceConfigBackup(path);
-  if (restored) {
-    const cause = raw === null ? 'is missing' : 'is empty or corrupt';
+
+  const backupPath = workspaceConfigBackupPath(path);
+  const backup = await readWorkspaceConfigFile(backupPath);
+  const restored = 'raw' in backup ? parseWorkspaceConfig(backup.raw) : null;
+  if (restored && restored.projects.length > 0) {
+    const cause = 'raw' in primary ? 'is empty or corrupt' : `is ${primary.error}`;
     console.warn(
-      `[cez] workspace config ${path} ${cause} — restored ${restored.projects.length} project(s) from ${workspaceConfigBackupPath(path)}`,
+      `[cez] workspace config ${path} ${cause} — restored ${restored.projects.length} project(s) from ${backupPath}`,
     );
-    return restored;
+    // An unreadable primary may have newer registry data than the backup.
+    return { config: restored, status: 'error' in primary && primary.error === 'unreadable' ? 'degraded' : 'backup' };
   }
-  if (raw === null) return defaultWorkspaceConfig();
-  console.warn(
-    `[cez] workspace config ${path} is corrupt — using defaults (re-add projects with \`cezar projects add\`)`,
-  );
-  return defaultWorkspaceConfig();
+
+  if ('error' in primary && primary.error === 'missing' && 'error' in backup && backup.error === 'missing') {
+    return { config: defaultWorkspaceConfig(), status: 'empty-default' };
+  }
+
+  if ('error' in primary && primary.error === 'missing' && 'error' in backup && backup.error === 'unreadable') {
+    console.warn(`[cez] workspace config backup ${backupPath} is unreadable — using defaults`);
+  } else if ('error' in primary && primary.error === 'missing' && 'raw' in backup) {
+    console.warn(`[cez] workspace config backup ${backupPath} is corrupt — using defaults`);
+  } else if ('raw' in primary) {
+    console.warn(
+      `[cez] workspace config ${path} is corrupt — using defaults (re-add projects with \`cezar projects add\`)`,
+    );
+  } else if (primary.error === 'unreadable') {
+    console.warn(`[cez] workspace config ${path} is unreadable — using defaults`);
+  }
+  return { config: defaultWorkspaceConfig(), status: 'degraded' };
+}
+
+/** Existing callers retain the never-throw fallback behavior. */
+export async function loadWorkspaceConfig(path: string = workspaceConfigPath()): Promise<WorkspaceConfig> {
+  return (await loadWorkspaceConfigWithStatus(path)).config;
 }
 
 /**

@@ -153,6 +153,8 @@ export const automationDefinitionSchema = z.object({
   /** `schedule` kind: always present. `github` kind: absent. */
   trackerTrigger: trackerTriggerSchema.optional(),
   schedule: automationScheduleSchema.optional(),
+  /** Internal workspace schedule target-state reset generation. */
+  workspaceRuntimeRevision: z.number().int().nonnegative().optional(),
   task: automationTaskSchema,
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -188,6 +190,10 @@ export const automationRuntimeStateSchema = z.object({
   /** `schedule` kind: the next occurrence's instant and the last fired one's. */
   nextRunAt: z.string().optional(),
   lastRunAt: z.string().optional(),
+  /** Workspace schedule target paused after repeated launch failures. */
+  autoPaused: z.boolean().optional(),
+    /** Workspace schedule's target-local state reset generation. */
+    workspaceRuntimeRevision: z.number().int().nonnegative().optional(),
   /** Per-query GitHub ETags, so an unchanged page costs no rate-limit budget. */
   etags: z.record(z.string(), z.string()).optional(),
   backoffUntil: z.string().optional(),
@@ -426,7 +432,7 @@ export type AutomationTemplatesResponse = z.infer<typeof automationTemplatesResp
  * `enable: true` asks the route to enable it AND establish a current-time baseline in one step.
  */
 export const createAutomationInputSchema = automationDefinitionSchema
-  .omit({ id: true, revision: true, createdAt: true, updatedAt: true, enabled: true, kind: true })
+  .omit({ id: true, revision: true, createdAt: true, updatedAt: true, enabled: true, kind: true, workspaceRuntimeRevision: true })
   .extend({
     /** Omitted = `github`, the shape every pre-schedule client sends. */
     kind: automationKindSchema.optional(),

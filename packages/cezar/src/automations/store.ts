@@ -44,6 +44,9 @@ type StateFile = ReturnType<typeof automationStateFileSchema.parse>;
 export interface AutomationStoreOptions {
   warn?: (message: string) => void;
   now?: () => Date;
+  /** Refuse to load a canonical definitions file if any stored definition is invalid. */
+  rejectInvalidDefinitions?: boolean;
+  validateDefinition?: (value: unknown) => boolean;
   /** Liveness probe for the pid recorded in the poll lock. Injected by tests only. */
   processAlive?: (pid: number) => boolean;
   /** Test-only hook for exercising a replacement between metadata validation and creation. */
@@ -349,14 +352,42 @@ export class AutomationStore {
 
   private loadDefinitions(): void {
     this.definitions.clear();
-    this.definitionsFile = this.readJson(DEFINITIONS, automationDefinitionsFileSchema, {
-      version: 1,
-      automations: [],
-    });
+    this.definitionsFile = this.options.rejectInvalidDefinitions
+      ? this.readStrictDefinitions()
+      : this.readJson(DEFINITIONS, automationDefinitionsFileSchema, {
+        version: 1,
+        automations: [],
+      });
     for (const raw of this.definitionsFile.automations) {
       const parsed = automationDefinitionSchema.safeParse(raw);
       if (parsed.success) this.definitions.set(parsed.data.id, parsed.data);
       else this.warnOnce('definitions', 'Ignored an invalid GitHub automation definition.');
+    }
+  }
+
+  private readStrictDefinitions(): DefinitionsFile {
+    let raw: string;
+    try {
+      raw = readFileSync(join(this.dataDir, DEFINITIONS), 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, automations: [] };
+      throw new Error('automation definitions are unavailable');
+    }
+    try {
+      const value: unknown = JSON.parse(raw);
+      if (!value || typeof value !== 'object' || Array.isArray(value)
+        || (value as { version?: unknown }).version !== 1
+        || !Array.isArray((value as { automations?: unknown }).automations)) {
+        throw new Error('invalid definitions file');
+      }
+      const parsed = automationDefinitionsFileSchema.safeParse(value);
+      if (!parsed.success || parsed.data.automations.some(definition =>
+        !automationDefinitionSchema.safeParse(definition).success
+        || this.options.validateDefinition?.(definition) === false,
+      )) throw new Error('invalid definitions file');
+      return parsed.data;
+    } catch {
+      throw new Error('automation definitions are unavailable');
     }
   }
 

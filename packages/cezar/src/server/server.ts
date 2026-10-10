@@ -6,9 +6,10 @@ import {
 import { createTrackerService } from './tracker/index.ts';
 import { TrackerWatches } from './tracker/watch.ts';
 import { readTrackerAssociation, writeTrackerAssociation, clearTrackerAssociation } from '../tracker-association.ts';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { AutomationStore } from '../automations/store.ts';
+import { createWorkspaceAutomation, listWorkspaceAutomations, openWorkspaceAutomationStore, updateWorkspaceAutomation } from '../automations/workspace-store.ts';
 import { AutomationCoordinator } from '../automations/coordinator.ts';
 import { GithubPoller } from '../automations/github-poller.ts';
 import { TrackerPoller } from '../automations/tracker-poller.ts';
@@ -49,6 +50,11 @@ import {
   type RunIndexEntry,
   type RunsIndexResponse,
   type StarCountPayload,
+  workspaceAutomationCreateSchema,
+  workspaceAutomationIdParamsSchema,
+  workspaceAutomationUpdateSchema,
+  type WorkspaceAutomationEntry,
+  type WorkspaceAutomationTarget,
 } from '@open-mercato/cezar-contract';
 // A contract VALUE, like `workspaceUiStateSchema` in workspace/migrations.ts — the request
 // schema this route validates with is the same one the client compiles against.
@@ -178,6 +184,7 @@ import {
   defaultWorkspaceConfig,
   effectiveSkillsAutoUpdate,
   loadWorkspaceConfig,
+  loadWorkspaceConfigWithStatus,
   mergeWriteWorkspaceConfig,
   effectiveComposerDefault,
   type WorkspaceConfig,
@@ -289,6 +296,10 @@ export interface ServerDeps {
    *  coordinator-owned instance so HTTP routes and the scheduler never cache
    *  separate views of the same project files. */
   automationStore?: AutomationStore;
+  /** The one workspace-wide definition store shared by routes and scheduler. */
+  workspaceAutomationStore?: AutomationStore | null;
+  /** The coordinator shared with workspace schedule targets. */
+  automationCoordinator?: AutomationCoordinator;
   /** Workspace-wide parallel-cap semaphore + cached resource config (spec
    *  2026-07-20, step 2.5): the ONE instance boot created, refreshed, and gave
    *  the boot manager — threaded into the default `ProjectContexts` so every
@@ -421,6 +432,14 @@ function allocateAgentProfileId(source: string, taken: Iterable<string>): string
   // `allocateProjectSlug` already basenames its argument and enforces the shared
   // `^[a-z0-9][a-z0-9-]{0,63}$` shape, so `~/.claude-klaudiusz` slugs to `claude-klaudiusz`.
   return allocateProjectSlug(source, taken);
+}
+
+function sameProjectRoot(left: string, right: string): boolean {
+  const key = (path: string) => {
+    try { return realpathSync(path); }
+    catch { return resolve(path); }
+  };
+  return key(left) === key(right);
 }
 
 const providerParamSchema = z.enum(PROVIDER_IDS);
@@ -1166,6 +1185,16 @@ async function probeWritableDir(dir: string, create: boolean): Promise<string | 
   }
 }
 
+function tryOpenWorkspaceAutomationStore(): AutomationStore | undefined {
+  try { return openWorkspaceAutomationStore(); }
+  catch {
+    console.warn('[cezar] Workspace automation storage is unavailable; workspace schedules are disabled.');
+    return undefined;
+  }
+}
+
+const WORKSPACE_AUTOMATION_DEFINITIONS_UNAVAILABLE = 'automation definitions are unavailable';
+
 // The return type is INFERRED on purpose: it is the chained app type built at the bottom of
 // this function, and `AppType` (src/server/app-type.ts) is `ReturnType<typeof createApp>`.
 // Annotating it `Hono` here would erase every route from the type and leave the typed client
@@ -1432,6 +1461,14 @@ export function createApp(deps: ServerDeps) {
     ...(deleted ? { deleted: true } : {}),
   });
   const automationsChanged = () => deps.automationsChanged?.();
+  const workspaceAutomationStore = deps.workspaceAutomationStore === null
+    ? undefined
+    : deps.workspaceAutomationStore ?? tryOpenWorkspaceAutomationStore();
+  const workspaceAutomationStoreRequired = workspaceAutomationStore!;
+  const automationCoordinator = deps.automationCoordinator ?? new AutomationCoordinator({
+    listProjects: async () => listProjects(),
+    pinned: bootProjectId,
+  });
 
   const providerRuntimeAuth = deps.providerRuntimeAuth
     ?? new ProviderRuntimeAuthObserver(providerAuth, (status) => {
@@ -3795,6 +3832,65 @@ export function createApp(deps: ServerDeps) {
     if (!capabilities().automations) return c.json({ error: AUTOMATIONS_OFF }, 409);
     await next();
   };
+  const requireWorkspaceAutomationScope = async (c: Context, next: Next) => {
+    if (capabilities().singleProject) return c.json({ error: 'Workspace automations are unavailable in single-project mode.' }, 409);
+    await next();
+  };
+  const requireWorkspaceAutomationStore = async (c: Context, next: Next) => {
+    if (!workspaceAutomationStore) return c.json({ error: 'Workspace automation storage is unavailable.' }, 503);
+    await next();
+  };
+
+  const workspaceAutomationProjects = async () => {
+    let config = await workspaceConfig.load();
+    // Old registries gain their stable membership ids on the first workspace-automation read.
+    if (config.projects.some(project => !project.entryId)) {
+      try { config = await workspaceConfig.mergeWrite(() => {}); }
+      catch { return []; }
+    }
+    const visible = await listProjects().catch(() => []);
+    const statusById = new Map(visible.map(project => [project.id, project.status]));
+    return config.projects.flatMap(project => project.entryId ? [{
+      targetEntryId: project.entryId,
+      projectId: project.id,
+      root: project.root,
+      name: project.name || basename(project.root),
+      available: statusById.get(project.id) !== undefined && statusById.get(project.id) !== 'missing',
+    }] : []);
+  };
+
+  const resolveWorkspaceAutomationProjects = async (targetEntryIds: string[], retainedTargetEntryIds: readonly string[] = []) => {
+    const projects = await workspaceAutomationProjects();
+    const byEntryId = new Map(projects.map(project => [project.targetEntryId, project]));
+    for (const targetEntryId of targetEntryIds) {
+      const project = byEntryId.get(targetEntryId);
+      if ((!project || !project.available) && !retainedTargetEntryIds.includes(targetEntryId)) {
+        return { error: 'Choose registered repositories that are currently available.' };
+      }
+    }
+    return { projects: targetEntryIds.flatMap(targetEntryId => {
+      const project = byEntryId.get(targetEntryId);
+      return project ? [project] : [];
+    }) };
+  };
+
+  const resetNewWorkspaceAutomationTarget = (project: { projectId: string; root: string }, automationId: string): 'busy' | 'unavailable' | undefined => {
+    let lease: ReturnType<AutomationStore['acquireLease']> = undefined;
+    try {
+      const store = automationCoordinator.store(project.projectId, project.root);
+      if (!store) return 'unavailable';
+      lease = store.acquireLease();
+      if (!lease || !lease.isValid()) return 'busy';
+      store.setState(`workspace:${automationId}`, current => ({
+        ...current, nextRunAt: undefined, consecutiveFailures: 0, autoPaused: false,
+      }));
+      return undefined;
+    } catch {
+      return 'unavailable';
+    } finally {
+      lease?.release();
+    }
+  };
 
   // ---- chained family: GitHub automations (project-scoped) ----
   // Every handler below reads `c.get('project')` — the definitions, their runtime state and the
@@ -4170,6 +4266,7 @@ export function createApp(deps: ServerDeps) {
   const automationChecksRoutes = new Hono()
     .use('/automation-checks/*', requireAutomations)
     .use('/workspace/automation-templates', requireAutomations)
+    .use('/workspace/automation-templates', requireWorkspaceAutomationScope)
     // The editor's "From your other projects" palette (spec 2026-09-14 Q7): every OTHER
     // registered project's definitions, read-only, from their own stores. Workspace-level
     // because it reads the registry, not the calling project.
@@ -4182,6 +4279,153 @@ export function createApp(deps: ServerDeps) {
     .get('/automation-checks/:checkId', (c) => {
       const check = manualChecks.get(c.req.param('checkId'));
       return check ? c.json(check) : c.json({ error: 'not found' }, 404);
+    });
+
+  const workspaceAutomationRoutes = new Hono()
+    .use('/workspace/automations', requireAutomations)
+    .use('/workspace/automations/*', requireAutomations)
+    .use('/workspace/automations', requireWorkspaceAutomationScope)
+    .use('/workspace/automations/*', requireWorkspaceAutomationScope)
+    .use('/workspace/automations', requireWorkspaceAutomationStore)
+    .use('/workspace/automations/*', requireWorkspaceAutomationStore)
+    .get('/workspace/automations', async c => {
+      let definitions: ReturnType<typeof listWorkspaceAutomations>;
+      try { definitions = listWorkspaceAutomations(workspaceAutomationStoreRequired); }
+      catch { return c.json({ error: 'workspace automation definitions are unavailable' }, 503); }
+      const projects = await workspaceAutomationProjects();
+      const byEntryId = new Map(projects.map(project => [project.targetEntryId, project]));
+      const automations = definitions.map((definition): WorkspaceAutomationEntry => ({
+        ...definition,
+        targets: definition.targetEntryIds.map(targetEntryId => {
+          const project = byEntryId.get(targetEntryId);
+          const runtimeId = `workspace:${definition.id}`;
+          let state: ReturnType<AutomationStore['state']> = undefined;
+          let latestLog: ReturnType<AutomationStore['logs']>[number] | undefined;
+          let targetAvailable = project?.available === true;
+          try {
+            const targetStore = project?.available
+              ? automationCoordinator.store(project.projectId, project.root)
+              : undefined;
+            state = targetStore?.state(runtimeId);
+            latestLog = targetStore?.logs({ automationId: runtimeId, limit: 1 })[0];
+            if (!targetStore) targetAvailable = false;
+          } catch {
+            targetAvailable = false;
+          }
+          const status: WorkspaceAutomationTarget['status'] = !targetAvailable ? 'unavailable'
+            : state?.autoPaused ? 'auto-paused'
+              : definition.enabled ? 'scheduled' : 'paused';
+          return {
+            targetEntryId,
+            ...(project ? { projectId: project.projectId, name: project.name } : { name: `Removed repository (${targetEntryId.slice(0, 8)})` }),
+            status,
+            ...(definition.enabled && !state?.autoPaused && state?.nextRunAt ? { nextRunAt: state.nextRunAt } : {}),
+            ...(state?.lastRunAt ? { lastRunAt: state.lastRunAt } : {}),
+            ...(latestLog ? { latestLog } : {}),
+          };
+        }),
+      }));
+      const nextDue = automations.flatMap(item => item.targets)
+        .filter(target => target.status === 'scheduled' && target.nextRunAt)
+        .map(target => target.nextRunAt!)
+        .sort()[0];
+      return c.json({
+        projects: projects.map(({ targetEntryId, projectId, name, available }) => ({ targetEntryId, projectId, name, available })),
+        automations,
+        timeZone: localTimeZone(),
+        scheduler: { state: automations.some(item => item.targets.some(target => target.status === 'scheduled')) ? 'scheduled' as const : 'idle' as const, ...(nextDue ? { nextDue } : {}) },
+      });
+    })
+    .post('/workspace/automations', jsonZodValidator(() => workspaceAutomationCreateSchema), async c => {
+      const body = c.req.valid('json');
+      const selected = await resolveWorkspaceAutomationProjects(body.targetEntryIds);
+      if ('error' in selected) return c.json({ error: selected.error }, 400);
+      const kindIssue = automationKindIssue(body, 'schedule');
+      if (kindIssue) return c.json({ error: kindIssue }, 400);
+      const promptIssue = validateAutomationPrompt(body.task.prompt, 'schedule');
+      if (promptIssue) return c.json({ error: promptIssue }, 400);
+      for (const project of selected.projects) {
+        const accountIssue = await automationAccountIssue(project.root, body.task);
+        if (accountIssue) return c.json({ error: `${project.name}: ${accountIssue}` }, 400);
+      }
+      const { enable, ...input } = body;
+      try {
+        const automation = createWorkspaceAutomation(workspaceAutomationStoreRequired, {
+          ...input, enabled: enable === true,
+        });
+        workspaceEvents.emit('automation-change', { project: 'workspace', automationId: automation.id, revision: automation.revision });
+        automationsChanged();
+        return c.json({ automation }, 201);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message === WORKSPACE_AUTOMATION_DEFINITIONS_UNAVAILABLE) {
+          return c.json({ error: 'workspace automation definitions are unavailable' }, 503);
+        }
+        return c.json({ error: message }, message.includes('conflict') ? 409 : 400);
+      }
+    })
+    .put('/workspace/automations/:id', paramZodValidator(workspaceAutomationIdParamsSchema), jsonZodValidator(() => workspaceAutomationUpdateSchema), async c => {
+      const { id } = c.req.valid('param');
+      const body = c.req.valid('json');
+      let current: ReturnType<typeof listWorkspaceAutomations>[number] | undefined;
+      try { current = listWorkspaceAutomations(workspaceAutomationStoreRequired).find(item => item.id === id); }
+      catch { return c.json({ error: 'workspace automation definitions are unavailable' }, 503); }
+      if (!current) return c.json({ error: 'not found' }, 404);
+      const selected = await resolveWorkspaceAutomationProjects(body.targetEntryIds, current.targetEntryIds);
+      if ('error' in selected) return c.json({ error: selected.error }, 400);
+      const kindIssue = automationKindIssue(body, 'schedule');
+      if (kindIssue) return c.json({ error: kindIssue }, 400);
+      const promptIssue = validateAutomationPrompt(body.task.prompt, 'schedule');
+      if (promptIssue) return c.json({ error: promptIssue }, 400);
+      const { expectedRevision, targetEntryIds, enabled, ...input } = body;
+      try {
+        const taskChanged = JSON.stringify(current.task) !== JSON.stringify(body.task);
+        const newlySelected = targetEntryIds.filter(targetId => !current.targetEntryIds.includes(targetId));
+        const willEnable = enabled ?? current.enabled;
+        if (willEnable && (taskChanged || newlySelected.length > 0 || !current.enabled)) {
+          for (const project of selected.projects.filter(item => item.available)) {
+            const accountIssue = await automationAccountIssue(project.root, body.task);
+            if (accountIssue) return c.json({ error: `${project.name}: ${accountIssue}` }, 400);
+          }
+        }
+        const scheduleChanged = JSON.stringify(current.schedule) !== JSON.stringify(body.schedule);
+        for (const project of selected.projects.filter(item => newlySelected.includes(item.targetEntryId))) {
+          const target = resetNewWorkspaceAutomationTarget(project, id);
+          if (target === 'busy') return c.json({ error: `${project.name}: automation schedule is busy; retry the edit.` }, 409);
+          if (target === 'unavailable') return c.json({ error: `${project.name}: automation store is unavailable.` }, 503);
+        }
+        const resetRuntime = scheduleChanged || taskChanged || (!current.enabled && willEnable);
+        const automation = updateWorkspaceAutomation(workspaceAutomationStoreRequired, id, expectedRevision, {
+          ...input, kind: 'schedule', schedule: body.schedule,
+          enabled: enabled ?? current.enabled, targetEntryIds,
+        }, resetRuntime);
+        workspaceEvents.emit('automation-change', { project: 'workspace', automationId: automation.id, revision: automation.revision });
+        automationsChanged();
+        return c.json({ automation });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message === WORKSPACE_AUTOMATION_DEFINITIONS_UNAVAILABLE) {
+          return c.json({ error: 'workspace automation definitions are unavailable' }, 503);
+        }
+        return c.json({ error: message }, message.includes('conflict') ? 409 : 400);
+      }
+    })
+    .delete('/workspace/automations/:id', paramZodValidator(workspaceAutomationIdParamsSchema), async c => {
+      const { id } = c.req.valid('param');
+      try {
+        const current = workspaceAutomationStoreRequired.get(id);
+        if (!current) return c.json({ error: 'not found' }, 404);
+        if (!workspaceAutomationStoreRequired.delete(id)) return c.json({ error: 'not found' }, 404);
+        workspaceEvents.emit('automation-change', { project: 'workspace', automationId: id, revision: current.revision, deleted: true });
+        automationsChanged();
+        return c.body(null, 204);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message === WORKSPACE_AUTOMATION_DEFINITIONS_UNAVAILABLE) {
+          return c.json({ error: 'workspace automation definitions are unavailable' }, 503);
+        }
+        return c.json({ error: message }, message.includes('conflict') ? 409 : 500);
+      }
     });
 
   /**
@@ -6795,6 +7039,7 @@ export function createApp(deps: ServerDeps) {
     .route('/', workspaceConfigRoutes)
     .route('/', fsBrowseRoutes)
     .route('/', automationChecksRoutes)
+    .route('/', workspaceAutomationRoutes)
     .route('/', specialistsRoutes)
     .route('/', runsIndexRoutes)
     .route('/', dashboardRoutes(dashboard, () => ({ tokens: capabilities().tokenUsageMetrics, cost: capabilities().costMetrics }), () => capabilities().automations))
@@ -6844,7 +7089,15 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
   // one line below and the boot folder's automations would silently stop being
   // scheduled while the cockpit kept showing them enabled. Registered or not,
   // pinning is the same statement: this process is serving that project.
-  const automationCoordinator = new AutomationCoordinator({ listProjects, pinned: bootProjectId });
+  const listAutomationProjects = async () => {
+    const loaded = await loadWorkspaceConfigWithStatus();
+    if (loaded.status === 'degraded') throw new Error('workspace project registry is unavailable');
+    return listProjects(undefined, loaded.config);
+  };
+  const automationCoordinator = new AutomationCoordinator({ listProjects: listAutomationProjects, pinned: bootProjectId });
+  const workspaceAutomationStore = deps.workspaceAutomationStore === null
+    ? undefined
+    : deps.workspaceAutomationStore ?? tryOpenWorkspaceAutomationStore();
   const bootAutomationStore = automationCoordinator.store(bootProjectId, deps.repoRoot)!;
   const sharedContexts = deps.contexts ?? new ProjectContexts({
     listProjects,
@@ -6863,6 +7116,8 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
     onDispose: (cleanup) => { appCleanups.push(cleanup); deps.onDispose?.(cleanup); },
     contexts: sharedContexts,
     automationStore: bootAutomationStore,
+    workspaceAutomationStore: workspaceAutomationStore ?? null,
+    automationCoordinator,
     workspaceEvents,
     skillsUpdate,
     socketHub,
@@ -6888,17 +7143,32 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
   // per-connection provider cache that duplicating costs nothing correctness-wise.
   const automationTrackers = createTrackerService();
   const registerAutomationProject = async (id: string, root: string): Promise<void> => {
-    const parsed = parseRemote((await getRepoInfo(root))?.remote ?? '');
-    automationProjects.set(id, { root, ...(parsed?.host === 'github.com' ? { github: { owner: parsed.owner, repo: parsed.repo } } : {}) });
+    let github: { owner: string; repo: string } | undefined;
+    try {
+      const parsed = parseRemote((await getRepoInfo(root))?.remote ?? '');
+      if (parsed?.host === 'github.com') github = { owner: parsed.owner, repo: parsed.repo };
+    } catch { /* scheduled runs do not require a remote */ }
+    automationProjects.set(id, { root, ...(github ? { github } : {}) });
   };
   const automationScheduler = new WorkspaceAutomationScheduler({
     coordinator: automationCoordinator,
+    pinnedProjectId: bootProjectId,
+    workspaceStore: workspaceAutomationStore,
+    workspaceDefinitions: () => workspaceAutomationStore ? listWorkspaceAutomations(workspaceAutomationStore) : [],
+    workspaceTargets: async (projects) => {
+      if (resolveCapabilities(process.env, deps.bindHost).singleProject) return [];
+      const targets = projects.flatMap(project => project.entryId
+        ? [{ targetEntryId: project.entryId, projectId: project.id, root: project.root, available: project.status !== 'missing' }]
+        : []);
+      await Promise.all(targets.filter(target => target.available).map(target => registerAutomationProject(target.projectId, target.root)));
+      return targets;
+    },
     handle: (projectId, store): ProjectAutomationHandle | undefined => {
       const project = automationProjects.get(projectId);
       if (!project) return undefined;
       const contextOf = async () => {
         const bootId = deps.bootProjectId ?? 'default';
-        return projectId === bootId
+        return projectId === bootId || sameProjectRoot(project.root, deps.repoRoot)
           ? { root: deps.repoRoot, manager: deps.manager, store: deps.store }
           : await sharedContexts.context(projectId);
       };
@@ -6924,6 +7194,10 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
         launchSchedule: async (definition, occurrence, receiptId) => {
           const context = await contextOf();
           return launchScheduledRun({ root: context.root, manager: context.manager, store: context.store, definition, occurrence, receiptId, projectName: basename(context.root), timeZone: localTimeZone(), dispatchEnabled });
+        },
+        prepareSchedule: async () => {
+          const context = await contextOf();
+          reconcileAutomationReceipts(store, context.store, { strict: true });
         },
         launchTracker: async (definition, candidate, receiptId) => {
           const context = await contextOf();
@@ -6957,7 +7231,8 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
     }
   });
   server.once('listening', () => {
-    void listProjects().then((projects) => {
+    void (async () => {
+      const projects = await listProjects().catch(() => []);
       const all = projects.some((project) => project.root === deps.repoRoot)
         ? projects : [{ id: deps.bootProjectId ?? 'default', root: deps.repoRoot, status: 'ok' as const }, ...projects];
       coordinator.start(all);
@@ -6965,16 +7240,19 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
       // to reconcile, and above all no scheduler to start. The skills-update coordinator above is
       // a separate feature and starts either way.
       if (!automationsEnabled()) return;
-      void Promise.all(all.map(async (project) => {
-        await registerAutomationProject(project.id, project.root);
-        const automationStore = automationCoordinator.store(project.id, project.root);
-        const runStore = project.id === (deps.bootProjectId ?? 'default')
-          ? deps.store
-          : sharedContexts.peek(project.id)?.store;
-        if (automationStore && runStore) reconcileAutomationReceipts(automationStore, runStore);
-        if (automationStore) rebaselineIdleAutomations(automationStore, (automationId, revision) => workspaceEvents.emit('automation-change', { project: project.id, automationId, revision }));
-      })).then(() => automationScheduler.start()).catch(() => undefined);
-    }).catch(() => undefined);
+      await Promise.all(all.map(async (project) => {
+        try {
+          await registerAutomationProject(project.id, project.root);
+          const automationStore = automationCoordinator.store(project.id, project.root);
+          const runStore = project.id === (deps.bootProjectId ?? 'default')
+            ? deps.store
+            : sharedContexts.peek(project.id)?.store;
+          if (automationStore && runStore) reconcileAutomationReceipts(automationStore, runStore);
+          if (automationStore) rebaselineIdleAutomations(automationStore, (automationId, revision) => workspaceEvents.emit('automation-change', { project: project.id, automationId, revision }));
+        } catch { /* one target's unreadable state must not prevent the workspace scheduler from starting */ }
+      }));
+      await automationScheduler.start();
+    })().catch(() => undefined);
   });
   server.once('close', () => { for (const cleanup of appCleanups) cleanup(); unsubscribe(); coordinator.stop(); automationScheduler.stop(); });
   socketHub.attach(server, (req) => {
