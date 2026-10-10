@@ -13,6 +13,7 @@ import { TrackerConnections } from '../server/tracker/connections.ts';
 import {
   mergeWriteWorkspaceConfig,
   loadWorkspaceConfig,
+  type WorkspaceConfig,
   type WorkspaceProject,
 } from './config.ts';
 
@@ -343,8 +344,8 @@ export interface ProjectListSelector {
   projectId: string;
 }
 
-export async function listProjects(selector?: ProjectListSelector): Promise<ProjectListEntry[]> {
-  const config = await loadWorkspaceConfig();
+export async function listProjects(selector?: ProjectListSelector, configOverride?: WorkspaceConfig): Promise<ProjectListEntry[]> {
+  const config = configOverride ?? await loadWorkspaceConfig();
   const projects = selector
     ? config.projects.filter((project) => project.id === selector.projectId)
     : config.projects;

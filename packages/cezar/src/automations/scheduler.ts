@@ -1,5 +1,5 @@
 import { runEventPollCycle, launchEventCandidate } from './event-poll-cycle.ts';
-import type { AutomationCoordinator } from './coordinator.ts';
+import type { AutomationCoordinator, AutomationProjectSource } from './coordinator.ts';
 import { POLL_RECORD_CEILING } from './github-poller.ts';
 import type { GithubCandidate, GithubPoller, GithubPollResult } from './github-poller.ts';
 import { ScheduleRunner, type ScheduleLauncher } from './schedule-runner.ts';
@@ -8,6 +8,7 @@ import type { TrackerDriver } from '../server/tracker/types.ts';
 import type { TrackerFailure } from '@open-mercato/cezar-contract';
 import { TrackerPoller, type TrackerAutomationCandidate } from './tracker-poller.ts';
 import { isGithubAutomation, isScheduleAutomation, isTrackerAutomation, type AutomationRuntimeState, type GithubAutomationDefinition, type TrackerAutomationDefinition } from './types.ts';
+import type { WorkspaceScheduleAutomation } from '@open-mercato/cezar-contract';
 
 const CURSOR_OVERLAP_MS = 120_000;
 
@@ -43,6 +44,8 @@ export interface ProjectAutomationHandle {
   launch?: AutomationLauncher;
   launchSchedule?: ScheduleLauncher;
   launchTracker?: TrackerAutomationLauncher;
+  /** Reconcile receipts against the target run store before a workspace child reserves one. */
+  prepareSchedule?: () => Promise<void>;
   onChange?: (automationId: string, revision: number) => void;
   now?: () => number;
 }
@@ -301,6 +304,10 @@ const MIN_RETRY_MS = 60_000;
 export interface WorkspaceAutomationSchedulerOptions {
   coordinator: AutomationCoordinator;
   handle: (projectId: string, store: AutomationStore) => ProjectAutomationHandle | undefined;
+  workspaceStore?: AutomationStore;
+  workspaceDefinitions?: () => readonly WorkspaceScheduleAutomation[];
+  workspaceTargets?: (projects: readonly AutomationProjectSource[]) => Promise<readonly { targetEntryId: string; projectId: string; root: string; available: boolean }[]>;
+  pinnedProjectId?: string;
   now?: () => number;
 }
 
@@ -309,7 +316,9 @@ export class WorkspaceAutomationScheduler {
   private timer?: ReturnType<typeof setTimeout>;
   private stopped = true;
   private scheduleGeneration = 0;
-  /** `projectId:automationId` → the instant a just-failed item may be tried again. */
+  private workspaceTargets: readonly { targetEntryId: string; projectId: string; root: string; available: boolean }[] = [];
+  private workspaceTargetsUnavailable = false;
+  /** Item key → the instant a just-failed item may be tried again. */
   private readonly retryAfter = new Map<string, number>();
   constructor(private readonly options: WorkspaceAutomationSchedulerOptions) {}
 
@@ -323,7 +332,7 @@ export class WorkspaceAutomationScheduler {
     const generation = ++this.scheduleGeneration;
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
-    await this.options.coordinator.refresh();
+    try { await this.refreshWorkspaceTargets(generation); } catch { /* retry on the bounded workspace timer */ }
     if (this.stopped || generation !== this.scheduleGeneration) return;
     this.schedule();
   }
@@ -348,29 +357,166 @@ export class WorkspaceAutomationScheduler {
     const now = this.options.now?.() ?? Date.now();
     const due: Array<{ key: string; at: number; retryAfterMs: number; fire: () => Promise<unknown> }> = [];
     const live = new Set<string>();
-    for (const projectId of this.options.coordinator.enabledProjectIds()) {
-      const store = this.options.coordinator.store(projectId);
-      if (!store) continue;
-      const handle = this.options.handle(projectId, store);
-      if (!handle) continue;
-      for (const definition of store.list().filter((item) => item.enabled)) {
-        const key = `${projectId}:${definition.id}`;
+    let workspaceDefinitions: WorkspaceScheduleAutomation[] = [];
+    try { workspaceDefinitions = this.options.workspaceDefinitions?.().filter(definition => definition.enabled && definition.targetEntryIds.length) ?? []; }
+    catch { /* a damaged canonical workspace file must not stop local schedules */ }
+    const retryTarget = (key: string): void => {
+      live.add(key);
+      const retryAt = this.retryAfter.get(key) ?? now + MIN_RETRY_MS;
+      this.retryAfter.set(key, retryAt);
+      due.push({
+        key, at: this.notBefore(key, retryAt), retryAfterMs: MIN_RETRY_MS,
+        fire: async () => { throw new Error('workspace automation target is unavailable'); },
+      });
+    };
+    if (this.workspaceTargetsUnavailable) {
+      const key = 'workspace:target-registry';
+      live.add(key);
+      const retryAt = this.retryAfter.get(key) ?? now + MIN_RETRY_MS;
+      this.retryAfter.set(key, retryAt);
+      due.push({
+        key, at: this.notBefore(key, retryAt), retryAfterMs: MIN_RETRY_MS,
+        fire: async () => {
+          const generation = this.scheduleGeneration;
+          await this.refreshWorkspaceTargets(generation);
+        },
+      });
+    }
+    let projectIds: string[] = [];
+    try { projectIds = this.options.coordinator.enabledProjectIds(); }
+    catch { /* local store discovery cannot prevent workspace schedules from being armed */ }
+    if (this.workspaceTargetsUnavailable && this.options.pinnedProjectId !== undefined) {
+      projectIds = projectIds.filter(projectId => projectId === this.options.pinnedProjectId);
+    }
+    for (const projectId of projectIds) {
+      try {
+        const store = this.options.coordinator.store(projectId);
+        if (!store) continue;
+        const handle = this.options.handle(projectId, store);
+        if (!handle) continue;
+        for (const definition of store.list().filter((item) => item.enabled)) {
+          const key = `${projectId}:${definition.id}`;
+          live.add(key);
+          if (isGithubAutomation(definition)) {
+            if (!handle.github) continue;
+            const scheduler = new ProjectAutomationScheduler(handle);
+            const at = Date.parse(store.state(definition.id)?.nextCheckAt ?? new Date(now).toISOString());
+            due.push({ key, at: this.notBefore(key, at), retryAfterMs: Math.max(definition.intervalSeconds * 1_000, MIN_RETRY_MS), fire: () => scheduler.check(definition) });
+          } else if (isScheduleAutomation(definition)) {
+            const runner = new ScheduleRunner({ ...handle, launch: handle.launchSchedule, now: this.options.now });
+            const at = runner.dueAt(definition);
+            if (at === null) continue;
+            due.push({ key, at: this.notBefore(key, at), retryAfterMs: MIN_RETRY_MS, fire: async () => {
+              const outcome = await runner.fire(definition);
+              if (outcome.result === 'lease-held') throw new Error('automation schedule lease is held');
+            } });
+          } else if (isTrackerAutomation(definition)) {
+            if (!handle.tracker) continue;
+            const scheduler = new ProjectTrackerAutomationScheduler(handle);
+            const at = Date.parse(store.state(definition.id)?.nextCheckAt ?? new Date(now).toISOString());
+            due.push({ key, at: this.notBefore(key, at), retryAfterMs: Math.max(definition.intervalSeconds * 1000, MIN_RETRY_MS), fire: () => scheduler.check(definition) });
+          }
+        }
+      } catch {
+        retryTarget(`${projectId}:unavailable`);
+      }
+    }
+    const targetByEntryId = new Map(this.workspaceTargets.map(target => [target.targetEntryId, target]));
+    for (const definition of workspaceDefinitions) {
+      for (const targetEntryId of definition.targetEntryIds) {
+        const target = targetByEntryId.get(targetEntryId);
+        if (!target) continue;
+        if (!target.available) {
+          const key = `workspace:missing-target:${targetEntryId}`;
+          if (!live.has(key)) {
+            live.add(key);
+            const retryAt = this.retryAfter.get(key) ?? now + MIN_RETRY_MS;
+            this.retryAfter.set(key, retryAt);
+            due.push({
+              key, at: this.notBefore(key, retryAt), retryAfterMs: MIN_RETRY_MS,
+              fire: async () => {
+                const generation = this.scheduleGeneration;
+                const targets = await this.refreshWorkspaceTargets(generation);
+                if (targets?.some(item => item.targetEntryId === targetEntryId && !item.available)) {
+                  throw new Error('workspace automation target is unavailable');
+                }
+              },
+            });
+          }
+          continue;
+        }
+        const runtimeId = `workspace:${definition.id}`;
+        const key = `${target.targetEntryId}:${runtimeId}`;
         live.add(key);
-        if (isGithubAutomation(definition)) {
-          if (!handle.github) continue;
-          const scheduler = new ProjectAutomationScheduler(handle);
-          const at = Date.parse(store.state(definition.id)?.nextCheckAt ?? new Date(now).toISOString());
-          due.push({ key, at: this.notBefore(key, at), retryAfterMs: Math.max(definition.intervalSeconds * 1_000, MIN_RETRY_MS), fire: () => scheduler.check(definition) });
-        } else if (isScheduleAutomation(definition)) {
-          const runner = new ScheduleRunner({ ...handle, launch: handle.launchSchedule, now: this.options.now });
-          const at = runner.dueAt(definition);
+        try {
+          const store = this.options.coordinator.store(target.projectId, target.root);
+          if (!store) { retryTarget(key); continue; }
+          const handle = this.options.handle(target.projectId, store);
+          if (!handle?.launchSchedule) continue;
+          const isCurrent = () => this.options.workspaceDefinitions?.().some(item =>
+            item.id === definition.id && item.revision === definition.revision && item.enabled && item.targetEntryIds.includes(targetEntryId),
+          ) ?? false;
+          const resetRuntime = (revision: number, workspaceRuntimeRevision: number) => store.setState(runtimeId, current => ({
+            ...current, revision, workspaceRuntimeRevision,
+            nextRunAt: undefined, consecutiveFailures: 0, autoPaused: false,
+          }));
+          if (store.state(runtimeId)?.workspaceRuntimeRevision !== definition.workspaceRuntimeRevision) {
+            const targetLease = store.acquireLease();
+            if (!targetLease) { retryTarget(key); continue; }
+            let mutation: ReturnType<AutomationStore['acquireMutationLease']> = undefined;
+            try {
+              mutation = this.options.workspaceStore?.acquireMutationLease();
+              if (this.options.workspaceStore && !mutation) { retryTarget(key); continue; }
+              if (!isCurrent()) continue;
+              const latest = this.options.workspaceDefinitions?.().find(item => item.id === definition.id);
+              if (!latest || latest.revision !== definition.revision || !latest.enabled || !latest.targetEntryIds.includes(targetEntryId)) continue;
+              if (store.state(runtimeId)?.workspaceRuntimeRevision !== latest.workspaceRuntimeRevision) {
+                resetRuntime(latest.revision, latest.workspaceRuntimeRevision);
+              }
+            } finally {
+              mutation?.release();
+              targetLease.release();
+            }
+          }
+          if (store.state(runtimeId)?.autoPaused) continue;
+          const child = { ...definition, id: runtimeId };
+          const runner = new ScheduleRunner({
+            projectId: target.projectId, store, timeZone: handle.timeZone,
+            launch: handle.launchSchedule, prepare: async () => {
+              await handle.prepareSchedule?.();
+              const mutation = this.options.workspaceStore?.acquireMutationLease();
+              if (this.options.workspaceStore && !mutation) throw new Error('workspace automation store is busy');
+              let keepMutation = false;
+              try {
+                const targets = await this.refreshWorkspaceTargets(this.scheduleGeneration);
+                if (!targets?.some(item => item.targetEntryId === target.targetEntryId
+                  && item.projectId === target.projectId && item.root === target.root && item.available)) return false;
+                if (!isCurrent()) return false;
+                const state = store.state(runtimeId);
+                if (state?.workspaceRuntimeRevision !== definition.workspaceRuntimeRevision) {
+                  resetRuntime(definition.revision, definition.workspaceRuntimeRevision);
+                  return false;
+                }
+                if (mutation) {
+                  keepMutation = true;
+                  return () => mutation.release();
+                }
+                return undefined;
+              } finally {
+                if (mutation && !keepMutation) mutation.release();
+              }
+            },
+            onChange: handle.onChange, now: this.options.now,
+            onAutoPause: () => store.setState(runtimeId, current => ({ ...current, autoPaused: true })),
+          });
+          const at = runner.dueAt(child);
           if (at === null) continue;
-          due.push({ key, at: this.notBefore(key, at), retryAfterMs: MIN_RETRY_MS, fire: () => runner.fire(definition) });
-        } else if (isTrackerAutomation(definition)) {
-          if (!handle.tracker) continue;
-          const scheduler = new ProjectTrackerAutomationScheduler(handle);
-          const at = Date.parse(store.state(definition.id)?.nextCheckAt ?? new Date(now).toISOString());
-          due.push({ key, at: this.notBefore(key, at), retryAfterMs: Math.max(definition.intervalSeconds * 1000, MIN_RETRY_MS), fire: () => scheduler.check(definition) });
+          due.push({ key, at: this.notBefore(key, at), retryAfterMs: MIN_RETRY_MS, fire: async () => {
+            const outcome = await runner.fire(child);
+            if (outcome.result === 'lease-held') throw new Error('automation schedule lease is held');
+          } });
+        } catch {
+          retryTarget(key);
         }
       }
     }
@@ -378,21 +524,48 @@ export class WorkspaceAutomationScheduler {
     if (!due.length) return;
     due.sort((a, b) => a.at - b.at);
     const next = due[0]!;
-    this.timer = setTimeout(() => {
-      this.timer = undefined;
+    const generation = this.scheduleGeneration;
+    const timer = setTimeout(() => {
+      if (this.stopped || generation !== this.scheduleGeneration) return;
+      if (this.timer === timer) this.timer = undefined;
       void next.fire().then(
-        () => { this.retryAfter.delete(next.key); },
+        () => { if (generation === this.scheduleGeneration) this.retryAfter.delete(next.key); },
         // Never re-arm a rejected item at its own past `at` (#983): that is a zero-delay spin, and
         // because one timer serves the whole workspace it also starves every other project until
         // something else moves the item forward. The floor is this workspace's own memory of the
         // failure — independent of whatever the project's store did or did not manage to persist.
-        () => { this.retryAfter.set(next.key, (this.options.now?.() ?? Date.now()) + next.retryAfterMs); },
-      ).finally(() => this.schedule());
+        () => {
+          if (generation === this.scheduleGeneration) {
+            this.retryAfter.set(next.key, (this.options.now?.() ?? Date.now()) + next.retryAfterMs);
+          }
+        },
+      ).finally(() => {
+        if (!this.stopped && generation === this.scheduleGeneration) this.schedule();
+      });
     }, Math.max(0, next.at - now));
+    this.timer = timer;
   }
 
   /** An item that just failed waits out its retry floor, however due its persisted state looks. */
   private notBefore(key: string, at: number): number {
     return Math.max(at, this.retryAfter.get(key) ?? 0);
+  }
+
+  private async refreshWorkspaceTargets(generation: number): Promise<readonly { targetEntryId: string; projectId: string; root: string; available: boolean }[] | undefined> {
+    try {
+      const projects = await this.options.coordinator.refresh();
+      if (!projects) throw new Error('workspace project registry is unavailable');
+      const targets = await this.options.workspaceTargets?.(projects) ?? [];
+      if (this.stopped || generation !== this.scheduleGeneration) return undefined;
+      this.workspaceTargets = targets;
+      this.workspaceTargetsUnavailable = false;
+      return targets;
+    } catch (error) {
+      if (!this.stopped && generation === this.scheduleGeneration) {
+        this.workspaceTargets = [];
+        this.workspaceTargetsUnavailable = true;
+      }
+      throw error;
+    }
   }
 }

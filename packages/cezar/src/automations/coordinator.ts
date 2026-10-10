@@ -1,5 +1,6 @@
 import { existsSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { ensureDataGitignore } from '../data-gitignore.ts';
 import { AutomationStore } from './store.ts';
 
 /**
@@ -24,6 +25,8 @@ export interface AutomationProjectSource {
   id: string;
   root: string;
   status: 'ok' | 'missing' | 'not-git';
+  entryId?: string;
+  name?: string;
 }
 
 export interface AutomationCoordinatorOptions {
@@ -66,13 +69,13 @@ export class AutomationCoordinator {
 
   constructor(private readonly options: AutomationCoordinatorOptions) {}
 
-  async refresh(): Promise<void> {
+  async refresh(): Promise<readonly AutomationProjectSource[] | undefined> {
     let projects: readonly AutomationProjectSource[];
     try {
       projects = await this.options.listProjects();
     } catch (error) {
       this.options.warn?.(`Unable to refresh GitHub automations: ${error instanceof Error ? error.message : String(error)}`);
-      return;
+      return undefined;
     }
     // The pinned boot id survives the sweep: it is a project this process is
     // demonstrably serving, not a stale handle, and the registry it is being
@@ -88,9 +91,14 @@ export class AutomationCoordinator {
         continue;
       }
       this.roots.set(project.id, project.root);
-      const definitions = join(project.root, '.ai/cezar/automations.json');
-      if (existsSync(definitions)) this.store(project.id, project.root);
+      try {
+        const definitions = join(project.root, '.ai/cezar/automations.json');
+        if (existsSync(definitions)) this.store(project.id, project.root);
+      } catch (error) {
+        this.options.warn?.(`Unable to open automations for ${project.id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
+    return projects;
   }
 
   store(projectId: string, root?: string): AutomationStore | undefined {
@@ -101,6 +109,7 @@ export class AutomationCoordinator {
     const key = rootKey(projectRoot);
     let store = this.stores.get(key);
     if (!store) {
+      ensureDataGitignore(projectRoot);
       store = AutomationStore.open(join(projectRoot, '.ai/cezar'), { warn: this.options.warn });
       this.stores.set(key, store);
     }
@@ -125,7 +134,12 @@ export class AutomationCoordinator {
       if (root === undefined) continue;
       const key = rootKey(root);
       const store = this.stores.get(key);
-      if (!store?.list().some((definition) => definition.enabled)) continue;
+      try {
+        if (!store?.list().some((definition) => definition.enabled)) continue;
+      } catch (error) {
+        this.options.warn?.(`Unable to read automations for ${projectId}: ${error instanceof Error ? error.message : String(error)}`);
+        continue;
+      }
       if (!chosen.has(key) || projectId === this.options.pinned) chosen.set(key, projectId);
     }
     return [...chosen.values()];

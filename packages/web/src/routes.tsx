@@ -99,6 +99,9 @@ const SkillsRoute = lazy(() => import('./routes/skills').then((m) => ({ default:
 const AutomationsRoute = lazy(() =>
   import('./routes/automations/automations-route').then((m) => ({ default: m.AutomationsRoute })),
 )
+const WorkspaceAutomationsRoute = lazy(() =>
+  import('./routes/automations/workspace-automations-route').then((m) => ({ default: m.WorkspaceAutomationsRoute })),
+)
 
 /** `/settings/skills` moved to the top-level `/skills` (out of the Settings shell). Redirect —
  *  preserving the `?skill=` selection and any hash — so pasted links and saved bookmarklets
@@ -295,6 +298,7 @@ const PAGE_TITLE_ROUTES = [
   // The global page. It is not project-scoped, so it never carries a `/p/` prefix to strip —
   // but it goes through the same table, because the browser title is one mechanism.
   { pattern: '/tasks', pageLabel: 'All tasks' },
+  { pattern: '/workspace/automations/*', pageLabel: 'Workspace automations' },
   { pattern: '/dashboard', pageLabel: 'Dashboard' },
   { pattern: '/new', pageLabel: 'New task' },
   { pattern: '/compare/:groupId', pageLabel: 'Compare' },
@@ -587,6 +591,9 @@ export const AppRoutes = memo(function AppRoutes() {
           React Router ranks this static segment above that `*`, so the two never compete. */}
       <Route path="/tasks" element={<GlobalTasksRoute />} />
       <Route path="/dashboard" element={<Suspense fallback={<div role="status" className="p-6 text-sm text-muted-foreground">Loading dashboard…</div>}><DashboardRoute /></Suspense>} />
+      <Route path="/workspace/automations" element={<Suspense fallback={<AutomationsLoading />}><WorkspaceAutomationsRoute /></Suspense>} />
+      <Route path="/workspace/automations/new" element={<Suspense fallback={<AutomationsLoading />}><WorkspaceAutomationsRoute mode="new" /></Suspense>} />
+      <Route path="/workspace/automations/:automationId" element={<Suspense fallback={<AutomationsLoading />}><WorkspaceAutomationsRoute mode="edit" /></Suspense>} />
 
       {/* Global settings (multi-project spec, step 3.5) — the one cockpit area that is NOT
           under `/p/:projectId`, because nothing here belongs to a project: appearance and

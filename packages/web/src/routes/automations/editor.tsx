@@ -3,7 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { ArrowLeftIcon, FileTextIcon, LayoutTemplateIcon, Settings2Icon } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
-import type { AutomationListEntry, AutomationsResponse } from '@open-mercato/cezar-api-client'
+import type { AutomationListEntry, AutomationsResponse, WorkspaceAutomationProject, WorkspaceScheduleAutomation } from '@open-mercato/cezar-api-client'
 import { ApiError, createAutomation, updateAutomation } from '@/api/client'
 import { useHealth, useRepo, useSkills, useUiState, useWorkflows } from '@/api/queries'
 import { Chip } from '@/components/chip'
@@ -41,7 +41,7 @@ import { TemplatePalette } from './template-palette'
 import { automationsQueryKey, type AutomationActions } from './use-automations'
 
 /** Where a save error is shown: under the section it names, or above everything. */
-type ErrorSection = 'top' | 'when' | 'what'
+type ErrorSection = 'top' | 'when' | 'what' | 'targets'
 
 interface SaveError {
   message: string
@@ -50,6 +50,7 @@ interface SaveError {
 
 function sectionOf(message: string): ErrorSection {
   const text = message.toLowerCase()
+  if (/repository|target/.test(text)) return 'targets'
   if (/\b(events?|filters?|schedule|interval|changedlabels|changed labels|lookback|maxrecords)\b/.test(text)) return 'when'
   if (/\b(prompt|workflow|runner|model|dispatch)\b/.test(text)) return 'what'
   return 'top'
@@ -67,10 +68,16 @@ const PLACEHOLDER = {
  * files, and this component owns the header, the save and the two error paths — a stale
  * revision (409, "edited elsewhere") and a validation 400 shown under the section it names.
  */
-export function AutomationEditor({ data, automation, actions, onBack, onSaved, onLog }: {
-  data: AutomationsResponse | undefined
-  automation?: AutomationListEntry
+export function AutomationEditor({ data, automation, actions, workspace, onBack, onSaved, onLog }: {
+  data: Pick<AutomationsResponse, 'timeZone' | 'available' | 'reason'> | undefined
+  automation?: AutomationListEntry | WorkspaceScheduleAutomation
   actions?: AutomationActions
+  workspace?: {
+    projects: readonly WorkspaceAutomationProject[]
+    targetEntryIds: readonly string[]
+    refresh: () => void
+    onSave: (body: ReturnType<typeof toBody>, enabled: boolean, targetEntryIds: string[], current?: WorkspaceScheduleAutomation) => Promise<void>
+  }
   onBack: () => void
   onSaved: () => void
   onLog?: () => void
@@ -84,6 +91,7 @@ export function AutomationEditor({ data, automation, actions, onBack, onSaved, o
   const repo = useRepo()
 
   const [draft, setDraft] = useState<EditorDraft>(() => (automation ? fromDefinition(automation) : newDraft()))
+  const [selectedTargets, setSelectedTargets] = useState<string[]>(() => [...(workspace?.targetEntryIds ?? [])])
   const [showTemplates, setShowTemplates] = useState(!automation)
   const [trackerValid, setTrackerValid] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -99,6 +107,7 @@ export function AutomationEditor({ data, automation, actions, onBack, onSaved, o
     if (!automation || revision === loadedRevision.current) return
     loadedRevision.current = revision
     setDraft(fromDefinition(automation))
+    if ('targetEntryIds' in automation) setSelectedTargets([...automation.targetEntryIds])
     setConflict(false)
     setError(null)
   }, [automation, revision])
@@ -119,7 +128,7 @@ export function AutomationEditor({ data, automation, actions, onBack, onSaved, o
   const sourcesReady = skills.data !== undefined && workflows.data !== undefined && !uiState.isPending
   const baseBranch = repo.data?.baseBranch ?? repo.data?.info?.branch ?? undefined
   const cli = useMemo(() => cliDefinitionOf(draft), [draft])
-  const canSave = draft.name.trim().length > 0 && draft.prompt.trim().length > 0 && !saving && (draft.kind !== 'tracker' || trackerValid)
+  const canSave = draft.name.trim().length > 0 && draft.prompt.trim().length > 0 && !saving && (draft.kind !== 'tracker' || trackerValid) && (!workspace || selectedTargets.length > 0)
 
   const insertPrompt = (snippet: string) => {
     const box = promptRef.current
@@ -139,12 +148,15 @@ export function AutomationEditor({ data, automation, actions, onBack, onSaved, o
     setConflict(false)
     try {
       const body = toBody(draft)
-      if (automation) {
+      if (workspace) {
+        const current = automation && 'targetEntryIds' in automation ? automation : undefined
+        await workspace.onSave(body, draft.enabled, selectedTargets, current)
+      } else if (automation) {
         await updateAutomation(automation.id, { ...body, enabled: draft.enabled, expectedRevision: automation.revision })
       } else {
         await createAutomation({ ...body, enable: draft.enabled })
       }
-      await queryClient.invalidateQueries({ queryKey: automationsQueryKey() })
+      if (!workspace) await queryClient.invalidateQueries({ queryKey: automationsQueryKey() })
       onSaved()
     } catch (caught) {
       if (automation && caught instanceof ApiError && caught.status === 409) {
@@ -158,7 +170,7 @@ export function AutomationEditor({ data, automation, actions, onBack, onSaved, o
     }
   }
 
-  const reload = () => void queryClient.invalidateQueries({ queryKey: automationsQueryKey() })
+  const reload = () => workspace ? workspace.refresh() : void queryClient.invalidateQueries({ queryKey: automationsQueryKey() })
   const saveLabel = automation ? 'Save changes' : draft.enabled ? 'Save and enable' : 'Save paused'
 
 
@@ -175,7 +187,7 @@ export function AutomationEditor({ data, automation, actions, onBack, onSaved, o
           <Pill dot={automation.enabled ? 'success' : 'neutral'}>{automation.enabled ? 'enabled' : 'paused'}</Pill>
         ) : null}
         <span className="flex-1" />
-        {!automation ? (
+        {!automation && !workspace && health.data?.capabilities.singleProject !== true ? (
           <Button variant="ghost" size="sm" aria-expanded={showTemplates} aria-label={showTemplates ? 'Hide templates' : 'Start from a template'} onClick={() => setShowTemplates((open) => !open)}>
             <LayoutTemplateIcon aria-hidden="true" className="size-3.5" />
             <span className="max-md:hidden">{showTemplates ? 'Hide templates' : 'Start from a template'}</span>
@@ -196,7 +208,7 @@ export function AutomationEditor({ data, automation, actions, onBack, onSaved, o
             ) : null}
             {error?.section === 'top' ? <InlineAlert>{error.message}</InlineAlert> : null}
 
-            {showTemplates && !automation ? (
+            {showTemplates && !automation && !workspace && health.data?.capabilities.singleProject !== true ? (
               <TemplatePalette
                 onPick={(template) => {
                   // A template from another project may name a workflow this repo does not
@@ -218,14 +230,40 @@ export function AutomationEditor({ data, automation, actions, onBack, onSaved, o
               />
             </Section>
 
+            {workspace ? (
+              <Section title="Repositories">
+                <div className="flex flex-col gap-2">
+                  {workspace.projects.map(project => (
+                    <label key={project.targetEntryId} className={cn('flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm', !project.available && 'opacity-60')}>
+                      <input
+                        type="checkbox"
+                        aria-label={`Target ${project.name}`}
+                        disabled={!project.available && !selectedTargets.includes(project.targetEntryId)}
+                        checked={selectedTargets.includes(project.targetEntryId)}
+                        onChange={event => setSelectedTargets(current => event.target.checked
+                          ? [...current, project.targetEntryId]
+                          : current.filter(id => id !== project.targetEntryId))}
+                        className="size-4 accent-primary"
+                      />
+                      <span className="min-w-0 flex-1 truncate">{project.name}</span>
+                      {!project.available ? <span className="text-xs text-muted-foreground">Unavailable</span> : null}
+                    </label>
+                  ))}
+                  {workspace.projects.length === 0 ? <p className="m-0 text-xs text-muted-foreground">No registered repositories are available.</p> : null}
+                  {selectedTargets.length === 0 ? <p className="m-0 text-xs text-muted-foreground">Choose at least one repository.</p> : null}
+                </div>
+                {error?.section === 'targets' ? <InlineAlert>{error.message}</InlineAlert> : null}
+              </Section>
+            ) : null}
+
             <Section title="When">
-              <KindSegment
+              {workspace ? <p className="m-0 text-sm text-muted-foreground">This schedule runs independently in each selected repository.</p> : <KindSegment
                 value={draft.kind}
                 editing={!!automation}
                 githubAvailable={githubAvailable}
                 githubReason={data?.reason}
                 onChange={(kind) => patch({ kind, ...(kind === 'tracker' ? { intervalSeconds: 1800, enabled: false } : {}) })}
-              />
+              />}
               {draft.kind === 'schedule' ? (
                 <EditorScheduleFields schedule={draft.schedule} timeZone={timeZone} onChange={(schedule) => patch({ schedule })} />
               ) : draft.kind === 'tracker' ? (
@@ -309,7 +347,7 @@ export function AutomationEditor({ data, automation, actions, onBack, onSaved, o
             <NextRunsPreview kind={draft.kind} schedule={draft.schedule} intervalSeconds={draft.intervalSeconds} timeZone={timeZone} />
             <CopyAsCliCard definition={cli} />
             {automation && automation.kind !== 'schedule' && actions ? <Button variant="outline" disabled={actions.busy} onClick={() => void actions.preview(automation)}>Preview saved matches</Button> : null}
-            {automation?.lastRun ? (
+            {!workspace && automation && 'lastRun' in automation && automation.lastRun ? (
               <LastRunCard
                 lastRun={automation.lastRun}
                 busy={actions?.busy}

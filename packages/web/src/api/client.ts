@@ -22,6 +22,10 @@ import type {
   AutomationRetryResponse,
   AutomationRunResponse,
   AutomationTemplatesResponse,
+  WorkspaceAutomationCreate,
+  WorkspaceAutomationUpdate,
+  WorkspaceAutomationResponse,
+  WorkspaceAutomationsResponse,
   CreateAutomationInput,
   UpdateAutomationInput,
   AgentConfigListing,
@@ -1906,6 +1910,38 @@ export async function getAutomations(opts?: ReadOptions): Promise<AutomationsRes
     ),
     '/automations',
   )
+}
+
+/** The shared scheduled definitions and their per-repository runtime summaries. */
+export async function getWorkspaceAutomations(opts?: ReadOptions): Promise<WorkspaceAutomationsResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.automations.$get({}, init(opts)),
+    '/workspace/automations',
+  )
+}
+
+export async function createWorkspaceAutomation(input: WorkspaceAutomationCreate): Promise<WorkspaceAutomationResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.automations.$post({ json: input }),
+    '/workspace/automations',
+  )
+}
+
+export async function updateWorkspaceAutomation(id: string, input: WorkspaceAutomationUpdate): Promise<WorkspaceAutomationResponse> {
+  return unwrap(
+    await cez.api.v1.workspace.automations[':id'].$put({
+      param: { id: encodeURIComponent(id) },
+      json: input,
+    }),
+    `/workspace/automations/${encodeURIComponent(id)}`,
+  )
+}
+
+export async function deleteWorkspaceAutomation(id: string): Promise<void> {
+  const res = await cez.api.v1.workspace.automations[':id'].$delete({
+    param: { id: encodeURIComponent(id) },
+  })
+  if (!res.ok) throw errorFor(res.status, res.statusText, await res.text())
 }
 
 /** Create a definition. Always created PAUSED unless `enable` asks for a current-time baseline. */
