@@ -44,7 +44,7 @@ const COPY: Record<BoardAction, { title: string; effect: string; confirm: string
   },
   cancel: {
     title: 'Cancel this task?',
-    effect: 'The agent is stopped and the task completes as cancelled. The worktree stays.',
+    effect: 'The agent is stopped and the task moves to Not doing as cancelled. The worktree stays.',
     confirm: 'Cancel the task',
     menu: 'Cancel…',
     destructive: true,
@@ -52,7 +52,7 @@ const COPY: Record<BoardAction, { title: string; effect: string; confirm: string
   'stop-resume': {
     title: 'Stop the automatic resume?',
     effect:
-      "This task won't resume on its own when the usage limit resets. It stays failed, in Done; you can still continue it from its page.",
+      "This task won't resume on its own when the usage limit resets. It stays failed in Done; you can still continue it from its page.",
     confirm: 'Stop resuming',
     menu: 'Stop resuming…',
     destructive: true,
@@ -60,7 +60,7 @@ const COPY: Record<BoardAction, { title: string; effect: string; confirm: string
   rerun: {
     title: 'Run this again as a new task?',
     effect:
-      'A new task starts with the same prompt, workflow, agent and settings; this one stays as it is. Attachments are not copied.',
+      'A new task enters the normal queue with the same prompt, workflow, agent and settings; this task stays as it is. Attachments are not copied.',
     confirm: 'Run again',
     menu: 'Run again…',
     destructive: false,

@@ -153,11 +153,11 @@ afterAll(async () => {
 }, 90_000)
 
 describe('the Board against a live dry-run server', () => {
-  it('renders the five columns in order, and the sidebar lights Board', () => {
+  it('renders the six columns in order, and the sidebar lights Board', () => {
     const columns = browser.evaluate(
       `[...document.querySelectorAll('[data-slot="board-column"]')].map((c) => c.dataset.column)`,
     ) as string[]
-    expect(columns).toEqual(['queued', 'running', 'needs-you', 'review', 'done'])
+    expect(columns).toEqual(['queued', 'running', 'needs-you', 'review', 'not-doing', 'done'])
     expect(browser.isVisible('nav a[aria-current="page"][href$="/board"]')).toBe(true)
   })
 

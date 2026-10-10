@@ -6,14 +6,18 @@ import {
   ChevronsRightIcon,
   Clock3Icon,
   CoinsIcon,
+  CircleXIcon,
   CpuIcon,
   DollarSignIcon,
+  EllipsisIcon,
   FileDiffIcon,
   GitBranchIcon,
   ListChecksIcon,
   LinkIcon,
   MemoryStickIcon,
+  MessageSquareIcon,
   PencilIcon,
+  PlayIcon,
   PlusIcon,
   ScaleIcon,
   SearchIcon,
@@ -21,9 +25,9 @@ import {
   WorkflowIcon,
 } from 'lucide-react'
 import * as React from 'react'
-import { Link, useNavigate } from '@/lib/project-router'
+import { Link, useActiveProjectId, useNavigate } from '@/lib/project-router'
 
-import { archiveFinished, markAllRunsSeen, patchRun } from '@/api/client'
+import { archiveFinished, markAllRunsSeen, patchRun, sendProjectRunMessage } from '@/api/client'
 import { useRunUsage } from '@/api/global-events'
 import { queryKeys, useHealth, usePinRun, useReferenceProjectId, useRuns, writePatchedRunToCaches } from '@/api/queries'
 import type { RunRecord } from '@open-mercato/cezar-api-client'
@@ -39,6 +43,21 @@ import { ReferenceStatusProvider } from '@/components/reference-status'
 import { StatusDot } from '@/components/status-dot'
 import { SubtaskToggle } from '@/components/subtask-toggle'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toaster'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { deriveAttention } from '@/lib/attention'
@@ -71,6 +90,12 @@ import { usageMetricVisibility } from '@/lib/token-metrics'
 import { useTaskTableColumns } from '@/lib/use-task-table-columns'
 import { useNow } from '@/lib/use-now'
 import { cn } from '@/lib/utils'
+import { BoardMoveDialog } from '@/routes/board/board-move-dialog'
+import { useBoardMoves } from '@/routes/board/use-board-moves'
+import type { BoardAction } from '@/lib/board-moves'
+
+type TaskQuickAction = Extract<BoardAction, 'cancel' | 'rerun'>
+type TaskComment = (run: RunRecord, text: string) => Promise<void>
 
 /**
  * The Tasks overview — the table that IS the home at `/` (spec, "Task list & table", per PR
@@ -92,6 +117,8 @@ export function TasksOverview({
   onMarkAllRead,
   onRename,
   onTogglePin,
+  onQuickAction,
+  onComment,
   now = Date.now(),
   showTokens = true,
   showCost = true,
@@ -114,6 +141,10 @@ export function TasksOverview({
    *  for every surface at once — so the row's own control is also the only thing on this page
    *  that explains why one is up there. */
   onTogglePin?: (run: RunRecord, pinned: boolean) => void
+  /** Confirmed cancel/rerun actions from the scoped route. */
+  onQuickAction?: (run: RunRecord, action: TaskQuickAction) => void
+  /** A task message sent to the agent's current or queued session. */
+  onComment?: TaskComment
   /** Injected so the ages are not racing the clock in tests. */
   now?: number
   /** Presentation capability; defaults visible for older health responses and direct renders. */
@@ -126,6 +157,9 @@ export function TasksOverview({
   columnsPending?: boolean
 }) {
   const [query, setQuery] = React.useState('')
+  const [commentingRun, setCommentingRun] = React.useState<RunRecord | null>(null)
+  const [commentText, setCommentText] = React.useState('')
+  const [sendingComment, setSendingComment] = React.useState(false)
   // The subtask accordion (#1110): ids of the parents whose dispatched rows are unfolded.
   // Empty on arrival — collapsed is the default, and the chip on the parent row is the handle.
   // Session-local on purpose: "collapsed by default" is the contract, so a fresh visit folds
@@ -162,6 +196,26 @@ export function TasksOverview({
   // nowhere to show its result — and one that outlives the view, since un-archiving would then
   // drop the task at the top of the active list by a click that looked like it did nothing.
   const pinToggle = view === 'archived' ? undefined : onTogglePin
+  const openComment = (run: RunRecord) => {
+    setCommentText('')
+    setCommentingRun(run)
+  }
+  const submitComment = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const text = commentText.trim()
+    if (!commentingRun || !text || !onComment) return
+    setSendingComment(true)
+    try {
+      await onComment(commentingRun, text)
+      setCommentText('')
+      setCommentingRun(null)
+      toast('Comment sent to the agent')
+    } catch {
+      // The route owns the danger toast; keep the draft open for correction or retry.
+    } finally {
+      setSendingComment(false)
+    }
+  }
 
   return (
     <div data-route="tasks" className="flex min-h-full flex-col">
@@ -274,6 +328,8 @@ export function TasksOverview({
                         }
                         onRename={onRename}
                         onTogglePin={pinToggle}
+                        onQuickAction={onQuickAction}
+                        onComment={onComment ? openComment : undefined}
                         now={now}
                         columns={columns}
                         expandedColumns={expandedColumns}
@@ -301,6 +357,8 @@ export function TasksOverview({
                   showTokens={showTokens}
                   showCost={showCost}
                   onTogglePin={pinToggle}
+                  onQuickAction={onQuickAction}
+                  onComment={onComment ? openComment : undefined}
                 />
               ))}
             </div>
@@ -336,6 +394,42 @@ export function TasksOverview({
       >
         <PlusIcon className="size-[22px]" aria-hidden="true" />
       </Link>
+      <Dialog
+        open={commentingRun !== null && onComment !== undefined}
+        onOpenChange={(open) => {
+          if (!sendingComment && !open) setCommentingRun(null)
+        }}
+      >
+        {commentingRun && onComment ? (
+          <DialogContent data-slot="task-comment-dialog">
+            <form onSubmit={(event) => void submitComment(event)}>
+              <DialogHeader>
+                <DialogTitle>Comment on “{runTitle(commentingRun)}”</DialogTitle>
+                <DialogDescription>
+                  This sends a message to the agent’s active session or adds it to a queued task. It can prompt more work; it is not a private note.
+                </DialogDescription>
+              </DialogHeader>
+              <Textarea
+                autoFocus
+                value={commentText}
+                onChange={(event) => setCommentText(event.target.value)}
+                placeholder="Write a comment for the agent…"
+                aria-label="Comment for the agent"
+                className="mt-4 min-h-24"
+                disabled={sendingComment}
+              />
+              <DialogFooter className="mt-4">
+                <Button type="button" variant="outline" onClick={() => setCommentingRun(null)} disabled={sendingComment}>
+                  Cancel
+                </Button>
+                <Button type="submit" disabled={!commentText.trim() || sendingComment}>
+                  {sendingComment ? 'Sending…' : 'Send comment'}
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        ) : null}
+      </Dialog>
     </div>
   )
 }
@@ -550,6 +644,8 @@ function TableRow({
   queuePosition,
   onRename,
   onTogglePin,
+  onQuickAction,
+  onComment,
   now,
   columns,
   expandedColumns,
@@ -565,6 +661,8 @@ function TableRow({
   queuePosition: number | null
   onRename: (id: string, title: string) => void
   onTogglePin?: (run: RunRecord, pinned: boolean) => void
+  onQuickAction?: (run: RunRecord, action: TaskQuickAction) => void
+  onComment?: (run: RunRecord) => void
   now: number
   columns: readonly TaskColumnDefinition[]
   expandedColumns: NormalizedExpandedColumns
@@ -633,6 +731,8 @@ function TableRow({
             to={to}
             onRename={onRename}
             onTogglePin={onTogglePin}
+            onQuickAction={onQuickAction}
+            onComment={onComment}
             now={now}
           />
         )
@@ -656,6 +756,8 @@ function TaskTableCell({
   to,
   onRename,
   onTogglePin,
+  onQuickAction,
+  onComment,
   now,
 }: {
   column: TaskColumnDefinition
@@ -672,6 +774,8 @@ function TaskTableCell({
   to: string
   onRename: (id: string, title: string) => void
   onTogglePin?: (run: RunRecord, pinned: boolean) => void
+  onQuickAction?: (run: RunRecord, action: TaskQuickAction) => void
+  onComment?: (run: RunRecord) => void
   now: number
 }) {
   if (!expanded) return <FoldedTd column={column.id} />
@@ -690,17 +794,22 @@ function TaskTableCell({
       )
     case 'task':
       return (
-        <td data-column-id={column.id} className={cn(TD_BASE, 'min-w-[220px] max-w-0')}>
-          <TitleCell
-            run={run}
-            depth={depth}
-            childCount={childCount}
-            subtasksExpanded={subtasksExpanded}
-            onToggleSubtasks={onToggleSubtasks}
-            to={to}
-            onRename={onRename}
-            onTogglePin={onTogglePin}
-          />
+        <td data-column-id={column.id} className={cn(TD_BASE, 'min-w-[250px] max-w-0')}>
+          <div className="flex min-w-0 items-center gap-1">
+            <div className="min-w-0 flex-1">
+              <TitleCell
+                run={run}
+                depth={depth}
+                childCount={childCount}
+                subtasksExpanded={subtasksExpanded}
+                onToggleSubtasks={onToggleSubtasks}
+                to={to}
+                onRename={onRename}
+                onTogglePin={onTogglePin}
+              />
+            </div>
+            <TaskQuickActions run={run} onAction={onQuickAction} onComment={onComment} />
+          </div>
         </td>
       )
     case 'workflow':
@@ -952,6 +1061,8 @@ function TaskCard({
   showTokens,
   showCost,
   onTogglePin,
+  onQuickAction,
+  onComment,
 }: {
   run: RunRecord
   /** Nesting level under the task that dispatched this one; 0 for a top-level card. */
@@ -965,6 +1076,8 @@ function TaskCard({
   showTokens: boolean
   showCost: boolean
   onTogglePin?: (run: RunRecord, pinned: boolean) => void
+  onQuickAction?: (run: RunRecord, action: TaskQuickAction) => void
+  onComment?: (run: RunRecord) => void
 }) {
   const navigate = useNavigate()
   const attention = deriveAttention(run)
@@ -1050,6 +1163,7 @@ function TaskCard({
             className="-mr-1 mt-px"
           />
         ) : null}
+        <TaskQuickActions run={run} onAction={onQuickAction} onComment={onComment} />
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-1.5 font-mono text-[11.5px] font-medium text-muted-foreground tabular-nums">
         <span>{workflowLabel(run)}</span>
@@ -1095,6 +1209,63 @@ function TaskCard({
   )
 }
 
+/** Status-aware actions shared by the table row and its narrow-screen card. */
+function TaskQuickActions({
+  run,
+  onAction,
+  onComment,
+}: {
+  run: RunRecord
+  onAction?: (run: RunRecord, action: TaskQuickAction) => void
+  onComment?: (run: RunRecord) => void
+}) {
+  const stop = (event: React.SyntheticEvent) => event.stopPropagation()
+  const active = ['queued', 'running', 'waiting'].includes(run.status)
+  const canCancel = !run.archived && active && onAction !== undefined
+  const canRunNow = !run.archived && ['done', 'failed', 'cancelled'].includes(run.status) && !run.autoResumeAt && onAction !== undefined
+  const canComment = !run.archived && active && onComment !== undefined
+
+  if (!canCancel && !canRunNow && !canComment) return null
+
+  return (
+    <span data-slot="task-quick-actions" className="inline-flex shrink-0" onClick={stop}>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            title="Task actions"
+            aria-label={`Actions for ${runTitle(run)}`}
+            className="opacity-100 md:opacity-0 md:group-hover/row:opacity-100 md:focus-visible:opacity-100 no-hover:opacity-100"
+          >
+            <EllipsisIcon className="size-3.5" aria-hidden="true" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-[190px]" onClick={stop}>
+          {canRunNow ? (
+            <DropdownMenuItem onSelect={() => onAction?.(run, 'rerun')}>
+              <PlayIcon />
+              Run now
+            </DropdownMenuItem>
+          ) : null}
+          {canComment ? (
+            <DropdownMenuItem onSelect={() => onComment?.(run)}>
+              <MessageSquareIcon />
+              Comment…
+            </DropdownMenuItem>
+          ) : null}
+          {canCancel ? (
+            <DropdownMenuItem variant="destructive" onSelect={() => onAction?.(run, 'cancel')}>
+              <CircleXIcon />
+              Cancel task…
+            </DropdownMenuItem>
+          ) : null}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </span>
+  )
+}
+
 /** An honest em dash: this cell has nothing true to show. */
 function Dash() {
   return <span className="text-xs text-soft-foreground">—</span>
@@ -1128,6 +1299,8 @@ export function TasksOverviewRoute() {
   const metricVisibility = usageMetricVisibility(health.data)
   const [view, setView] = useListView()
   const queryClient = useQueryClient()
+  const actionProjectId = useActiveProjectId() ?? 'default'
+  const moves = useBoardMoves(React.useCallback(() => actionProjectId, [actionProjectId]))
   const archive = useMutation({
     mutationFn: archiveFinished,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.runs.all }),
@@ -1148,6 +1321,15 @@ export function TasksOverviewRoute() {
       void queryClient.invalidateQueries({ queryKey: queryKeys.runs.all })
     },
     onError: (error: Error) => toast(error.message, { tone: 'danger' }),
+  })
+  const comment = useMutation({
+    mutationFn: ({ runId, text }: { runId: string; text: string }) =>
+      sendProjectRunMessage(actionProjectId, runId, { text }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.runs.all }),
+    onError: (error: Error) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.runs.all })
+      toast(error.message, { tone: 'danger' })
+    },
   })
   // Pinning (#935) — this page is the scoped project's own table, so no explicit project id.
   const pin = usePinRun()
@@ -1175,27 +1357,32 @@ export function TasksOverviewRoute() {
   )
 
   return (
-    <ReferenceStatusProvider projectId={projectId} requests={referenceRequests}>
-      <TasksOverview
-        runs={runs.data}
-        view={view}
-        onViewChange={setView}
-        onArchiveFinished={() => archive.mutate()}
-        onMarkAllRead={() => markAllRead.mutate()}
-        onRename={(id, title) => rename.mutate({ id, title })}
-        onTogglePin={(run, pinned) =>
-          pin.mutate(
-            { id: run.id, pinned },
-            { onError: (error: Error) => toast(error.message, { tone: 'danger' }) },
-          )
-        }
-        now={now}
-        showTokens={metricVisibility.tokens}
-        showCost={metricVisibility.cost}
-        expandedColumns={taskTableColumns.expandedColumns}
-        onToggleColumn={taskTableColumns.toggleColumn}
-        columnsPending={taskTableColumns.isPending}
-      />
-    </ReferenceStatusProvider>
+    <>
+      <ReferenceStatusProvider projectId={projectId} requests={referenceRequests}>
+        <TasksOverview
+          runs={runs.data}
+          view={view}
+          onViewChange={setView}
+          onArchiveFinished={() => archive.mutate()}
+          onMarkAllRead={() => markAllRead.mutate()}
+          onRename={(id, title) => rename.mutate({ id, title })}
+          onTogglePin={(run, pinned) =>
+            pin.mutate(
+              { id: run.id, pinned },
+              { onError: (error: Error) => toast(error.message, { tone: 'danger' }) },
+            )
+          }
+          onQuickAction={(run, action) => void moves.request(run, action)}
+          onComment={(run, text) => comment.mutateAsync({ runId: run.id, text }).then(() => undefined)}
+          now={now}
+          showTokens={metricVisibility.tokens}
+          showCost={metricVisibility.cost}
+          expandedColumns={taskTableColumns.expandedColumns}
+          onToggleColumn={taskTableColumns.toggleColumn}
+          columnsPending={taskTableColumns.isPending}
+        />
+      </ReferenceStatusProvider>
+      <BoardMoveDialog moves={moves} />
+    </>
   )
 }

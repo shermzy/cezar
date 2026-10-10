@@ -66,7 +66,7 @@ describe('lane order is the sidebar order', () => {
   })
 })
 
-describe('active / done-only / quiet, at the 7-day Done window', () => {
+describe('active / done-only / quiet, at the 7-day terminal history window', () => {
   it.each<[string, Partial<TestRun>]>([
     ['queued', { status: 'queued' }],
     ['running', { status: 'running' }],
@@ -94,16 +94,16 @@ describe('active / done-only / quiet, at the 7-day Done window', () => {
       { now: NOW },
     )
     expect(kinds(lanes)).toEqual({ inside: 'done-only', outside: 'quiet', empty: 'quiet' })
-    expect(lanes.map((lane) => lane.hiddenDone)).toEqual([0, 1, 0])
+    expect(lanes.map((lane) => lane.hiddenHistory)).toEqual([0, 1, 0])
   })
 
-  it('"Show older done" moves the line: an old Done run is visible, so its lane is done-only', () => {
+  it('"Show older outcomes" moves the line: an old Done run is visible, so its lane is done-only', () => {
     const [lane] = groupLanes([project('p')], [], [run('p', { status: 'done', finishedAt: OUTSIDE_WINDOW })], {
       now: NOW,
-      showOlderDone: true,
+      showOlderHistory: true,
     })
     expect(lane?.kind).toBe('done-only')
-    expect(lane?.hiddenDone).toBe(0)
+    expect(lane?.hiddenHistory).toBe(0)
   })
 })
 
@@ -150,7 +150,7 @@ describe('archived runs', () => {
       { now: NOW },
     )
     expect(cardIds(lane)).toEqual([])
-    expect(lane?.hiddenDone).toBe(0)
+    expect(lane?.hiddenHistory).toBe(0)
     expect(lane?.kind).toBe('quiet')
   })
 })

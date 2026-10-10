@@ -316,27 +316,27 @@ describe('part A — a running card, and who is on it', () => {
     })
   }, 120_000)
 
-  it('Running → Done asks first, then cancels — the card moves only once the run is cancelled', async () => {
-    dragCard(browser, slow, '[data-slot="board-column"][data-column="done"]')
+  it('Running → Not doing asks first, then cancels — the card moves only once the run is cancelled', async () => {
+    dragCard(browser, slow, '[data-slot="board-column"][data-column="not-doing"]')
     // Not optimistic: until the confirm, the card is still where the run is.
     browser.waitForFunction(`${dialogAction} === 'cancel' && ${columnOf(slow)} === 'running'`)
     browser.click('[data-slot="board-move-confirm"]')
     await waitForStatus(baseUrl, slow, ['cancelled'])
-    browser.waitForFunction(`${columnOf(slow)} === 'done'`)
+    browser.waitForFunction(`${columnOf(slow)} === 'not-doing'`)
     browser.screenshot(`${artifactsDir}/board-1c-cancelled.png`)
   }, 120_000)
 
   it('an invalid drop snaps back with the reason', () => {
     dragCard(browser, slow, '[data-slot="board-column"][data-column="review"]')
     browser.waitForFunction(
-      `[...document.querySelectorAll('[data-slot="toast"]')].some((t) => t.textContent === 'To run a finished task again, drop it on Queued.')`,
+      `[...document.querySelectorAll('[data-slot="toast"]')].some((t) => t.textContent === 'To run this task again, drop it on Queued.')`,
     )
     expect(browser.count(DIALOG)).toBe(0)
-    expect(browser.evaluate(columnOf(slow))).toBe('done')
+    expect(browser.evaluate(columnOf(slow))).toBe('not-doing')
     browser.screenshot(`${artifactsDir}/board-1c-refused.png`, { viewport: true })
   })
 
-  it('Done → Queued runs it again as a new task, and the original stays in Done', async () => {
+  it('Not doing → Queued runs it again as a new task, and the original stays in Not doing', async () => {
     const before = new Set((await getJson<Array<{ id: string }>>(`${baseUrl}/api/v1/runs`)).map((run) => run.id))
     dragCard(browser, slow, '[data-slot="board-column"][data-column="queued"]')
     browser.waitForFunction(`${dialogAction} === 'rerun'`)
@@ -358,7 +358,7 @@ describe('part A — a running card, and who is on it', () => {
     )
     browser.waitForFunction(`document.querySelectorAll('[data-slot="toast"]').length === 0`)
     browser.screenshot(`${artifactsDir}/board-1c-running.png`)
-    expect(browser.evaluate(columnOf(slow))).toBe('done')
+    expect(browser.evaluate(columnOf(slow))).toBe('not-doing')
   }, 120_000)
 })
 
@@ -471,11 +471,11 @@ describe('part C — All boards: the boot lane (every platform)', () => {
     browser.waitForFunction(
       `document.querySelector('${shell(working)} [data-slot="board-card-agent"]')?.textContent === 'claude · Default · auto'`,
     )
-    dragCard(browser, working, `${lane} [data-slot="board-cell"][data-column="done"]`)
+    dragCard(browser, working, `${lane} [data-slot="board-cell"][data-column="not-doing"]`)
     browser.waitForFunction(`${dialogAction} === 'cancel'`)
     browser.click('[data-slot="board-move-confirm"]')
     await waitForStatus(baseUrl, working, ['cancelled'])
-    browser.waitForFunction(`${cellOf(working)} === 'done'`)
+    browser.waitForFunction(`${cellOf(working)} === 'not-doing'`)
     browser.screenshot(`${artifactsDir}/board-1c-all-boards.png`)
   }, 120_000)
 })
