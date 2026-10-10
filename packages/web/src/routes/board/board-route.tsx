@@ -39,7 +39,7 @@ const LANE = 'board'
  * or asks for a confirmed action (accept, finish, cancel, stop resuming, run again), or snaps back
  * with the reason.
  *
- * The five columns always render, even with no tasks — each empty one says "Nothing here", and a
+ * The six columns always render, even with no tasks — each empty one says "Nothing here", and a
  * hint under the title points at Queued — so a task started while the board is open lands in a
  * column that is already on screen. An error screen replaces the board only when there is no
  * data at all; a failed background refetch keeps the board it already has.
@@ -53,7 +53,7 @@ export function BoardRoute() {
   const profiles = useAgentProfiles()
   const desktop = useIsDesktop()
   const projectId = useActiveProjectId() ?? 'default'
-  const [showOlderDone, setShowOlderDone] = useState(false)
+  const [showOlderHistory, setShowOlderHistory] = useState(false)
   const [now, setNow] = useState(() => Date.now())
   const [focused, setFocused] = useState<BoardColumnId>('queued')
   const columnRefs = useRef<Partial<Record<BoardColumnId, HTMLElement | null>>>({})
@@ -76,13 +76,13 @@ export function BoardRoute() {
 
   const view = useMemo(() => {
     if (!runs.data) return undefined
-    const board = groupBoard(runs.data, { now, showOlderDone })
+    const board = groupBoard(runs.data, { now, showOlderHistory })
     return {
       columns: applyBoardOrder(board.columns, order.order),
-      hiddenDone: board.hiddenDone,
+      hiddenHistory: board.hiddenHistory,
       hasTasks: runs.data.some((run) => !run.archived),
     }
-  }, [runs.data, now, showOlderDone, order.order])
+  }, [runs.data, now, showOlderHistory, order.order])
 
   const columns = view?.columns
   // A confirmed card now drawn in another column has landed: announce it, give focus back.
@@ -91,7 +91,7 @@ export function BoardRoute() {
     if (columns) observe(projectId, columns)
   }, [columns, observe, projectId])
   const drop = useBoardDrop({
-    columns: columns ?? { queued: [], running: [], 'needs-you': [], review: [], done: [] },
+    columns: columns ?? { queued: [], running: [], 'needs-you': [], review: [], 'not-doing': [], done: [] },
     order,
     moves,
   })
@@ -122,15 +122,15 @@ export function BoardRoute() {
     columnRefs.current[id]?.scrollIntoView({ behavior: 'smooth', inline: 'start', block: 'nearest' })
   }
 
-  const doneAction =
-    view.hiddenDone > 0 || showOlderDone ? (
+  const historyAction =
+    view.hiddenHistory > 0 || showOlderHistory ? (
       <Button
         variant="ghost"
         size="sm"
         className="h-5 px-1.5 text-[12px]"
-        onClick={() => setShowOlderDone((value) => !value)}
+        onClick={() => setShowOlderHistory((value) => !value)}
       >
-        {showOlderDone ? 'Hide older' : `Show ${view.hiddenDone} older`}
+        {showOlderHistory ? 'Hide older outcomes' : `Show ${view.hiddenHistory} older outcomes`}
       </Button>
     ) : undefined
 
@@ -175,7 +175,7 @@ export function BoardRoute() {
               id={id}
               laneId={LANE}
               runs={columns[id]}
-              action={id === 'done' ? doneAction : undefined}
+              action={id === 'done' ? historyAction : undefined}
               ref={columnRefSetters[id]}
               renderCard={(run, handle, column) => (
                 <MovableBoardCard

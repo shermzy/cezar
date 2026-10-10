@@ -38,7 +38,7 @@ describe('boardColumn — every status lands in exactly the spec column', () => 
     ['waiting', {}, 'needs-you'],
     ['review', {}, 'review'],
     ['done', {}, 'done'],
-    ['cancelled', {}, 'done'],
+    ['cancelled', {}, 'not-doing'],
     ['failed', {}, 'done'],
   ] as const)('%s %j → %s', (status, extra, expected) => {
     expect(boardColumn(run({ status, ...extra }))).toBe(expected)
@@ -52,12 +52,12 @@ describe('boardColumn — every status lands in exactly the spec column', () => 
 describe('groupBoard', () => {
   it('drops archived runs from every column', () => {
     const archived = run({ status: 'running', archived: true })
-    const { columns, hiddenDone } = groupBoard([archived], { now: NOW })
+    const { columns, hiddenHistory } = groupBoard([archived], { now: NOW })
     expect(Object.values(columns).flat()).toEqual([])
-    expect(hiddenDone).toBe(0)
+    expect(hiddenHistory).toBe(0)
   })
 
-  it('puts every non-archived run in exactly one place (a column or the hidden-Done count)', () => {
+  it('puts every non-archived run in exactly one place (a column or the hidden-history count)', () => {
     const runs = [
       run({ status: 'queued' }),
       run({ status: 'running' }),
@@ -65,12 +65,13 @@ describe('groupBoard', () => {
       run({ status: 'review' }),
       run({ status: 'done', finishedAt: '2026-10-04T11:00:00.000Z' }),
       run({ status: 'done', finishedAt: '2026-09-01T11:00:00.000Z' }),
+      run({ status: 'cancelled', finishedAt: '2026-10-04T11:30:00.000Z' }),
       run({ status: 'failed', autoResumeAt: '2026-10-04T13:00:00.000Z' }),
     ]
-    const { columns, hiddenDone } = groupBoard(runs, { now: NOW })
+    const { columns, hiddenHistory } = groupBoard(runs, { now: NOW })
     const placed = Object.values(columns).flat().map((r) => r.id)
     expect(new Set(placed).size).toBe(placed.length)
-    expect(placed.length + hiddenDone).toBe(runs.length)
+    expect(placed.length + hiddenHistory).toBe(runs.length)
   })
 
   it('Queued: scheduled runs first by soonest resume, then queued runs oldest-first (FIFO)', () => {
@@ -105,39 +106,40 @@ describe('groupBoard', () => {
     expect(shape(columns).done).toEqual([createdEarlyFinishedLate.id, createdLateFinishedEarly.id])
   })
 
-  it('Done: hides runs finished more than 7 days ago, counts them, and shows them on request', () => {
+  it('hides terminal outcomes finished more than 7 days ago and shows them on request', () => {
     const recent = run({ status: 'done', finishedAt: new Date(NOW - DONE_WINDOW_MS + 60_000).toISOString() })
-    const old = run({ status: 'done', finishedAt: new Date(NOW - DONE_WINDOW_MS - 60_000).toISOString() })
+    const old = run({ status: 'cancelled', finishedAt: new Date(NOW - DONE_WINDOW_MS - 60_000).toISOString() })
     const hidden = groupBoard([recent, old], { now: NOW })
     expect(shape(hidden.columns).done).toEqual([recent.id])
-    expect(hidden.hiddenDone).toBe(1)
-    const shown = groupBoard([recent, old], { now: NOW, showOlderDone: true })
-    expect(shape(shown.columns).done).toEqual([recent.id, old.id])
-    expect(shown.hiddenDone).toBe(0)
+    expect(hidden.hiddenHistory).toBe(1)
+    const shown = groupBoard([recent, old], { now: NOW, showOlderHistory: true })
+    expect(shape(shown.columns).done).toEqual([recent.id])
+    expect(shape(shown.columns)['not-doing']).toEqual([old.id])
+    expect(shown.hiddenHistory).toBe(0)
   })
 
-  it('Done: a run with no finishedAt falls back to createdAt for the window', () => {
+  it('Not doing: a cancelled run with no finishedAt falls back to createdAt for the window', () => {
     const noFinish = run({ status: 'cancelled', createdAt: '2026-10-04T10:00:00.000Z' })
-    const { columns, hiddenDone } = groupBoard([noFinish], { now: NOW })
-    expect(shape(columns).done).toEqual([noFinish.id])
-    expect(hiddenDone).toBe(0)
+    const { columns, hiddenHistory } = groupBoard([noFinish], { now: NOW })
+    expect(shape(columns)['not-doing']).toEqual([noFinish.id])
+    expect(hiddenHistory).toBe(0)
   })
 
   it('Done: an unparseable finishedAt is treated as old (hidden and counted), never crashes', () => {
     const garbage = run({ status: 'done', finishedAt: 'not-a-date' })
-    const { columns, hiddenDone } = groupBoard([garbage], { now: NOW })
+    const { columns, hiddenHistory } = groupBoard([garbage], { now: NOW })
     expect(shape(columns).done).toEqual([])
-    expect(hiddenDone).toBe(1)
+    expect(hiddenHistory).toBe(1)
   })
 
   it('Done: with older shown, an unparseable finishedAt sorts last, as the oldest', () => {
     const garbage = run({ status: 'done', finishedAt: 'not-a-date' })
     const valid = run({ status: 'done', finishedAt: '2026-10-04T11:00:00.000Z' })
-    const { columns } = groupBoard([garbage, valid], { now: NOW, showOlderDone: true })
+    const { columns } = groupBoard([garbage, valid], { now: NOW, showOlderHistory: true })
     expect(shape(columns).done).toEqual([valid.id, garbage.id])
   })
 
-  it('the window does not apply to non-Done columns (an old queued run stays visible)', () => {
+  it('the window does not apply to active columns (an old queued run stays visible)', () => {
     const ancient = run({ status: 'queued', createdAt: '2026-01-01T00:00:00.000Z' })
     expect(shape(groupBoard([ancient], { now: NOW }).columns).queued).toEqual([ancient.id])
   })

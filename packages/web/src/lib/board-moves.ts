@@ -11,8 +11,8 @@ import type { BoardColumnId } from '@/lib/board-columns'
  * asked for in a dialog and the card moves when the run's REAL status changes over the stream.
  */
 
-/** The columns a user may order by hand. Queued follows cezar's real FIFO start order, and Done is
- *  history ordered by when tasks ended — a manual order there would mislead. */
+/** The columns a user may order by hand. Queued follows cezar's real FIFO start order; terminal
+ *  history is ordered by when tasks ended, so a manual order there would mislead. */
 export const REORDERABLE_COLUMNS = ['running', 'needs-you', 'review'] as const
 export type ReorderableColumn = (typeof REORDERABLE_COLUMNS)[number]
 
@@ -24,10 +24,10 @@ export function isReorderable(column: BoardColumnId): column is ReorderableColum
  * The confirmed key moves, each one an existing route:
  * - `accept` — Review → Done, `POST /runs/:id/finish` on a run resting at review;
  * - `finish` — Needs you → Done, `POST /runs/:id/finish` on an open session;
- * - `cancel` — Running/Queued → Done, `POST /runs/:id/cancel`;
+ * - `cancel` — Running/Queued/Needs you → Not doing, `POST /runs/:id/cancel`;
  * - `stop-resume` — a SCHEDULED card (failed, parked by a usage limit) → Done,
  *   `DELETE /runs/:id/auto-resume`: there is no queue entry or session for the cancel route to stop;
- * - `rerun` — Done → Queued, a new task through `POST /runs` (`rerunBody`).
+ * - `rerun` — Done/Not doing → Queued, a new task through `POST /runs` (`rerunBody`).
  */
 export type BoardAction = 'accept' | 'finish' | 'cancel' | 'stop-resume' | 'rerun'
 
@@ -42,9 +42,11 @@ export type MoveRun = Pick<RunRecord, 'status' | 'autoResumeAt'>
 const AGENT_OWNS_REVIEW = 'The agent decides when a task needs review.'
 const AGENT_OWNS_NEEDS_YOU = 'The agent decides when a task needs you.'
 const QUEUE_IS_FIFO = 'Queued tasks start in the order they were queued.'
-const DONE_IS_HISTORY = 'Done is in the order tasks ended.'
+const HISTORY_IS_ORDERED = 'Terminal outcomes are ordered by when tasks ended.'
 const QUEUE_STARTS_ITSELF = 'Queued tasks start on their own when a slot frees up.'
-const RERUN_FROM_QUEUED = 'To run a finished task again, drop it on Queued.'
+const RERUN_FROM_QUEUED = 'To run this task again, drop it on Queued.'
+const CANCEL_TO_NOT_DOING = 'Drop active work on Not doing to cancel it.'
+const NOT_DOING_NEEDS_ACTIVE_RUN = 'Only queued or active work can be cancelled.'
 const NO_WAY_BACK = "A task that has started can't go back to the queue."
 const REPLY_ON_ITS_PAGE = 'Answer it on its page to set it working again.'
 
@@ -55,17 +57,20 @@ const REPLY_ON_ITS_PAGE = 'Answer it on its page to set it working again.'
 export function moveIntent(from: BoardColumnId, to: BoardColumnId, run: MoveRun): MoveIntent {
   if (from === to) {
     if (isReorderable(from)) return { kind: 'reorder', column: from }
-    return refuse(from === 'queued' ? QUEUE_IS_FIFO : DONE_IS_HISTORY)
+    return refuse(from === 'queued' ? QUEUE_IS_FIFO : HISTORY_IS_ORDERED)
   }
-  if (from === 'done') return to === 'queued' ? action('rerun') : refuse(RERUN_FROM_QUEUED)
+  if (from === 'done' || from === 'not-doing') {
+    return to === 'queued' ? action('rerun') : refuse(RERUN_FROM_QUEUED)
+  }
   switch (to) {
     case 'done':
       if (from === 'review') return action('accept')
       if (from === 'needs-you') return action('finish')
-      if (from === 'running') return action('cancel')
-      // Queued holds two kinds of card: a run waiting for a slot, and a failed run with a resume
-      // booked. Only the first has anything for `POST /cancel` to cancel.
-      return action(run.status === 'failed' && run.autoResumeAt ? 'stop-resume' : 'cancel')
+      return refuse(CANCEL_TO_NOT_DOING)
+    case 'not-doing':
+      if (from === 'queued' && run.status === 'failed' && run.autoResumeAt) return action('stop-resume')
+      if (from === 'queued' || from === 'running' || from === 'needs-you') return action('cancel')
+      return refuse(NOT_DOING_NEEDS_ACTIVE_RUN)
     case 'queued':
       return refuse(NO_WAY_BACK)
     case 'running':
@@ -80,7 +85,7 @@ export function moveIntent(from: BoardColumnId, to: BoardColumnId, run: MoveRun)
 /** The actions a card's ⋯ menu offers: exactly the drops that would be actions from its column. */
 export function cardActions(from: BoardColumnId, run: MoveRun): BoardAction[] {
   const actions: BoardAction[] = []
-  for (const to of ['done', 'queued'] as const) {
+  for (const to of ['done', 'not-doing', 'queued'] as const) {
     const intent = moveIntent(from, to, run)
     if (intent.kind === 'action') actions.push(intent.action)
   }

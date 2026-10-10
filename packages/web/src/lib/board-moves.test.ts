@@ -31,19 +31,39 @@ const IN: Record<BoardColumnId, MoveRun> = {
   running,
   'needs-you': waiting,
   review,
+  'not-doing': cancelled,
   done,
 }
 
 const kind = (intent: MoveIntent) => (intent.kind === 'action' ? `action:${intent.action}` : intent.kind)
 
 describe('moveIntent — every from/to pair', () => {
-  // The whole 5×5 table, so a pair nobody thought about cannot silently become an action.
+  // The whole 6×6 table, so a pair nobody thought about cannot silently become an action.
   const table: Record<BoardColumnId, Record<BoardColumnId, string>> = {
-    queued: { queued: 'refuse', running: 'refuse', 'needs-you': 'refuse', review: 'refuse', done: 'action:cancel' },
-    running: { queued: 'refuse', running: 'reorder', 'needs-you': 'refuse', review: 'refuse', done: 'action:cancel' },
-    'needs-you': { queued: 'refuse', running: 'refuse', 'needs-you': 'reorder', review: 'refuse', done: 'action:finish' },
-    review: { queued: 'refuse', running: 'refuse', 'needs-you': 'refuse', review: 'reorder', done: 'action:accept' },
-    done: { queued: 'action:rerun', running: 'refuse', 'needs-you': 'refuse', review: 'refuse', done: 'refuse' },
+    queued: {
+      queued: 'refuse', running: 'refuse', 'needs-you': 'refuse', review: 'refuse',
+      'not-doing': 'action:cancel', done: 'refuse',
+    },
+    running: {
+      queued: 'refuse', running: 'reorder', 'needs-you': 'refuse', review: 'refuse',
+      'not-doing': 'action:cancel', done: 'refuse',
+    },
+    'needs-you': {
+      queued: 'refuse', running: 'refuse', 'needs-you': 'reorder', review: 'refuse',
+      'not-doing': 'action:cancel', done: 'action:finish',
+    },
+    review: {
+      queued: 'refuse', running: 'refuse', 'needs-you': 'refuse', review: 'reorder',
+      'not-doing': 'refuse', done: 'action:accept',
+    },
+    'not-doing': {
+      queued: 'action:rerun', running: 'refuse', 'needs-you': 'refuse', review: 'refuse',
+      'not-doing': 'refuse', done: 'refuse',
+    },
+    done: {
+      queued: 'action:rerun', running: 'refuse', 'needs-you': 'refuse', review: 'refuse',
+      'not-doing': 'refuse', done: 'refuse',
+    },
   }
   for (const from of BOARD_COLUMNS) {
     for (const to of BOARD_COLUMNS) {
@@ -57,20 +77,20 @@ describe('moveIntent — every from/to pair', () => {
     expect(moveIntent('review', 'review', review)).toEqual({ kind: 'reorder', column: 'review' })
   })
 
-  it('every finished status in Done runs again from Queued — failed and cancelled too', () => {
-    for (const run of [done, failed, cancelled]) {
-      expect(moveIntent('done', 'queued', run)).toEqual({ kind: 'action', action: 'rerun' })
-    }
+  it('every terminal outcome runs again from Queued — failed and cancelled too', () => {
+    expect(moveIntent('done', 'queued', done)).toEqual({ kind: 'action', action: 'rerun' })
+    expect(moveIntent('done', 'queued', failed)).toEqual({ kind: 'action', action: 'rerun' })
+    expect(moveIntent('not-doing', 'queued', cancelled)).toEqual({ kind: 'action', action: 'rerun' })
   })
 })
 
 describe('moveIntent — scheduled runs', () => {
   it('a scheduled run in Queued (parked by a usage limit) stops resuming rather than "cancelling" — the cancel route has nothing to cancel', () => {
-    expect(moveIntent('queued', 'done', scheduled)).toEqual({ kind: 'action', action: 'stop-resume' })
+    expect(moveIntent('queued', 'not-doing', scheduled)).toEqual({ kind: 'action', action: 'stop-resume' })
   })
 
   it('a really queued run in Queued is cancelled', () => {
-    expect(moveIntent('queued', 'done', queued)).toEqual({ kind: 'action', action: 'cancel' })
+    expect(moveIntent('queued', 'not-doing', queued)).toEqual({ kind: 'action', action: 'cancel' })
   })
 
   it('a scheduled run cannot be reordered or started by hand either', () => {
@@ -100,14 +120,14 @@ describe('moveIntent — refusal reasons', () => {
     expect(reason('queued', 'needs-you')).toBe('The agent decides when a task needs you.')
   })
 
-  it('Queued keeps cezar’s real start order, and Done is history', () => {
+  it('Queued keeps cezar’s real start order, and terminal outcomes are history', () => {
     expect(reason('queued', 'queued')).toBe('Queued tasks start in the order they were queued.')
-    expect(reason('done', 'done')).toBe('Done is in the order tasks ended.')
+    expect(reason('done', 'done')).toBe('Terminal outcomes are ordered by when tasks ended.')
   })
 
   it('a finished task points at the one move that works', () => {
     for (const to of ['running', 'needs-you', 'review'] as const) {
-      expect(reason('done', to)).toBe('To run a finished task again, drop it on Queued.')
+      expect(reason('done', to)).toBe('To run this task again, drop it on Queued.')
     }
   })
 
@@ -194,6 +214,7 @@ describe('applyBoardOrder and withColumnOrder — a hand-edited ui-state', () =>
     running: [r('a'), r('b')],
     'needs-you': [r('c')],
     review: [r('d'), r('e')],
+    'not-doing': [],
     done: [],
   }
 

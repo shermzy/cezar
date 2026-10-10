@@ -44,12 +44,12 @@ interface Pending {
 const TARGET: Record<BoardAction, BoardColumnId> = {
   accept: 'done',
   finish: 'done',
-  cancel: 'done',
+  cancel: 'not-doing',
   'stop-resume': 'done',
   rerun: 'queued',
 }
 
-/** The live region's words once a card has moved: `Cancelled “Fix it” — moved to Done.` */
+/** The live region's words once a card has moved. */
 const LANDED: Record<BoardAction, string> = {
   accept: 'Accepted',
   finish: 'Finished',

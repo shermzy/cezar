@@ -88,7 +88,7 @@ export function AllBoardsRoute() {
     useCallback((run: { projectId?: string }) => run.projectId ?? bootId ?? 'default', [bootId]),
   )
   const agentLine = useMemo(() => ({ profiles: profiles.data?.profiles }), [profiles.data])
-  const [showOlderDone, setShowOlderDone] = useState(false)
+  const [showOlderHistory, setShowOlderHistory] = useState(false)
   const [showQuiet, setShowQuiet] = useState(false)
   /** Explicit per-project choices, which win over the live default until the page unmounts. */
   const [choices, setChoices] = useState<ReadonlyMap<string, boolean>>(() => new Map())
@@ -102,13 +102,13 @@ export function AllBoardsRoute() {
     return {
       lanes: groupLanes(projects.data.projects, order, runs, {
         now,
-        showOlderDone,
+        showOlderHistory,
         truncatedIds: index.data.truncated,
       }),
       // The cap that produced the index, so a lane's truncation notice names the real number.
       perProjectLimit: index.data.perProjectLimit,
     }
-  }, [projects.data, index.data, needsBootRuns, unregisteredBootId, bootRuns.data, order, now, showOlderDone])
+  }, [projects.data, index.data, needsBootRuns, unregisteredBootId, bootRuns.data, order, now, showOlderHistory])
 
   const failure =
     (projects.isError && !projects.data ? projects.error : null) ??
@@ -135,10 +135,10 @@ export function AllBoardsRoute() {
 
   const shown = lanes.filter((lane) => lane.kind !== 'quiet')
   const quiet = lanes.filter((lane) => lane.kind === 'quiet')
-  const hiddenDone = lanes.reduce((sum, lane) => sum + lane.hiddenDone, 0)
-  // "No tasks yet" means no non-archived run in any listed project — hidden old Done runs count.
+  const hiddenHistory = lanes.reduce((sum, lane) => sum + lane.hiddenHistory, 0)
+  // "No tasks yet" means no non-archived run in any listed project — hidden old outcomes count.
   const hasTasks = lanes.some(
-    (lane) => lane.hiddenDone > 0 || BOARD_COLUMNS.some((id) => lane.columns[id].length > 0),
+    (lane) => lane.hiddenHistory > 0 || BOARD_COLUMNS.some((id) => lane.columns[id].length > 0),
   )
 
   const renderLane = (lane: (typeof lanes)[number]) => {
@@ -201,7 +201,7 @@ export function AllBoardsRoute() {
           {showQuiet ? quiet.map(renderLane) : null}
           {/* Bottom of the lane list, not the page header: the header is hidden below `md`, and
               these must be reachable at every width. */}
-          {quiet.length > 0 || hiddenDone > 0 || showOlderDone ? (
+          {quiet.length > 0 || hiddenHistory > 0 || showOlderHistory ? (
             <div data-slot="all-boards-toggles" className="flex flex-wrap items-center gap-2">
               {quiet.length > 0 ? (
                 <Button
@@ -216,15 +216,15 @@ export function AllBoardsRoute() {
                     : `Show ${quiet.length} quiet ${quiet.length === 1 ? 'project' : 'projects'}`}
                 </Button>
               ) : null}
-              {hiddenDone > 0 || showOlderDone ? (
+              {hiddenHistory > 0 || showOlderHistory ? (
                 <Button
                   data-slot="board-older-toggle"
                   variant="ghost"
                   size="sm"
-                  aria-pressed={showOlderDone}
-                  onClick={() => setShowOlderDone((value) => !value)}
+                  aria-pressed={showOlderHistory}
+                  onClick={() => setShowOlderHistory((value) => !value)}
                 >
-                  {showOlderDone ? 'Hide older done' : `Show ${hiddenDone} older done`}
+                  {showOlderHistory ? 'Hide older outcomes' : `Show ${hiddenHistory} older outcomes`}
                 </Button>
               ) : null}
             </div>

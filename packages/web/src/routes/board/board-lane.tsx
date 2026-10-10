@@ -17,24 +17,25 @@ import type { BoardMoves } from './use-board-moves'
 import { projectUiStateKey, useBoardDrop, useBoardOrder } from './use-board-order'
 
 /**
- * The five-column track every lane body and the sticky column-header row share, so a cell always
+ * The six-column track every lane body and the sticky column-header row share, so a cell always
  * sits under its header. 180 px per column is phase 1's minimum; below `md` there is no grid at
  * all — a lane stacks its non-empty columns instead.
  */
-export const LANE_GRID_CLASS = 'gap-3 md:grid-cols-[repeat(5,minmax(180px,1fr))]'
+export const LANE_GRID_CLASS = 'gap-3 md:grid-cols-[repeat(6,minmax(180px,1fr))]'
 
-/** The width a lane needs at its minimum: five 180 px columns (900) and four 12 px gaps (48), plus
+/** The width a lane needs at its minimum: six 180 px columns (1080) and five 12 px gaps (60), plus
  *  what surrounds the grid in a lane: the body's `px-1.5` (2 × 6 = 12) and the lane's 1 px border
- *  on each side (2) — 962 px. The board's scroller scrolls sideways below it rather than squeezing
+ *  on each side (2) — 1154 px. The board's scroller scrolls sideways below it rather than squeezing
  *  a column under 180 px. */
-export const LANE_GRID_MIN_WIDTH_CLASS = 'md:min-w-[962px]'
+export const LANE_GRID_MIN_WIDTH_CLASS = 'md:min-w-[1154px]'
 
-/** How a lane header counts a column: `2 running · 1 needs you · 3 done`. */
+/** How a lane header counts columns, including `not doing` and `done`. */
 const COUNT_WORDS: Record<BoardColumnId, string> = {
   queued: 'queued',
   running: 'running',
   'needs-you': 'needs you',
   review: 'in review',
+  'not-doing': 'not doing',
   done: 'done',
 }
 
@@ -50,8 +51,8 @@ function laneCounts(columns: Record<BoardColumnId, readonly unknown[]>): string 
  *
  * A `<section>` labelled by its heading — the project name, which links to that project's own
  * board. The disclosure button owns `aria-expanded`/`aria-controls`; collapsed, the counts read
- * `(1 done)`, expanded `1 running · 1 done`. A truncated lane says so in its header, linking to
- * the project's board, where the full run list lives.
+ * `(1 done · 1 not doing)`, expanded `1 running · 1 done`. A truncated lane says so in its
+ * header, linking to the project's board, where the full run list lives.
  *
  * The body is rendered (and `hidden`) even when collapsed, so `aria-controls` always names an
  * element, but it holds no cards until it opens.
